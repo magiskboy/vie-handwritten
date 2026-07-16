@@ -1,0 +1,9 @@
+{
+  "best_val_loss": 242.61834716796875,
+  "test": {
+    "cer": 0.7641385183235718,
+    "wer": 1.0019900497512437,
+    "n": 201
+  },
+  "weights": "/home/thanh/Work/personal/vie-handwritten/checkpoints/debug/best.weights.h5"
+}

@@ -197,11 +197,15 @@ def build_dataset(
     Yields ``({"image", "label_length", "input_length"}, labels)`` batches with
     variable width padded per batch.
     """
+    from vie_handwritten.model import WIDTH_DOWNSAMPLE
+
     pp = config["preprocess"]
     root_dir = _abs_path(config["data"]["root_dir"])
     height = int(pp.get("target_height", 64))
     channels = int(pp.get("channels", 3))
     batch_size = int(config["train"]["batch_size"])
+    # Single source of truth for width→time-step ratio (default = backbone stride product).
+    width_downsample = int(config.get("model", {}).get("width_downsample", WIDTH_DOWNSAMPLE))
 
     paths = [str(root_dir / r["image"]) for r in records]
     texts = [r["text"] for r in records]
@@ -250,7 +254,7 @@ def build_dataset(
             {
                 "image": images,
                 "label_length": label_lens,
-                "input_length": tf.maximum(widths // 8, 1),
+                "input_length": tf.maximum(widths // width_downsample, 1),
             },
             labels,
         ),

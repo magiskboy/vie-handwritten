@@ -38,6 +38,7 @@ model:
   bilstm_units: 256
   bilstm_layers: 2
   dropout: 0.0                   # TẮT regularization để model CÓ THỂ overfit
+  width_downsample: 8            # width→time-step ratio; phải khớp stride của backbone
 
 ctc:
   blank_index: 0
