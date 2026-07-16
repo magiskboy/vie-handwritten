@@ -185,6 +185,8 @@ class SinusoidalPositionalEncoding(layers.Layer):
         self.d_model = int(d_model)
 
     def call(self, x):
+        # Compute PE in float32 for numerical stability, then cast to input dtype
+        # (needed under mixed_float16 on CUDA).
         t = tf.shape(x)[1]
         depth = self.d_model // 2
         positions = tf.cast(tf.range(t), tf.float32)[:, tf.newaxis]
@@ -194,7 +196,11 @@ class SinusoidalPositionalEncoding(layers.Layer):
         pe = tf.concat([tf.sin(angle_rads), tf.cos(angle_rads)], axis=-1)
         if self.d_model % 2 == 1:
             pe = tf.pad(pe, [[0, 0], [0, 1]])
-        return x + pe[tf.newaxis, :, :]
+        pe = tf.cast(pe[tf.newaxis, :, :], x.dtype)
+        return x + pe
+
+    def compute_output_shape(self, input_shape):
+        return input_shape
 
     def get_config(self):
         cfg = super().get_config()
@@ -276,7 +282,8 @@ def build_transformer_head(
         )
 
     x = layers.LayerNormalization(epsilon=1e-6, name="transformer_out_ln")(x)
-    logits = layers.Dense(num_classes, name="logits")(x)
+    # float32 logits required for stable CTC under mixed_float16
+    logits = layers.Dense(num_classes, name="logits", dtype="float32")(x)
     return logits
 
 
