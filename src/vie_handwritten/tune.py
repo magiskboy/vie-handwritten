@@ -13,12 +13,12 @@ from pathlib import Path
 from typing import Any
 
 from vie_handwritten.charset import Charset
-from vie_handwritten.ctc import build_lm_decoder, ctc_lm_decode
 from vie_handwritten.dataset import ensure_manifests, load_manifest, resolve_image_path
-from vie_handwritten.evaluate import _charset_path, evaluate_corpus, postprocess
+from vie_handwritten.eval import evaluate_corpus
 from vie_handwritten.model import build_crnn, load_crnn_weights
+from vie_handwritten.postprocess import build_lm_decoder, ctc_lm_decode, normalize_text
 from vie_handwritten.preprocess import load_image, preprocess
-from vie_handwritten.utils import load_config
+from vie_handwritten.utils import charset_path, load_config
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +40,7 @@ def tune_lm(
     ctc_cfg = config.setdefault("ctc", {})
     ctc_cfg["decode"] = "beam_lm"
     pp_cfg = config.get("postprocess", {})
-    charset = Charset.from_file(_charset_path(config))
+    charset = Charset.from_file(charset_path(config))
 
     records = load_manifest(ensure_manifests(config)[split])
     if max_samples and len(records) > max_samples:
@@ -71,7 +71,7 @@ def tune_lm(
                     logits, decoder,
                     beam_width=beam_width, token_min_logp=tmin, beam_prune_logp=bprune,
                 )[0]
-                hyps.append(postprocess(text, pp_cfg))
+                hyps.append(normalize_text(text, pp_cfg))
                 refs.append(ref)
             m = evaluate_corpus(refs, hyps)
             results.append((alpha, beta, m["cer"], m["wer"]))

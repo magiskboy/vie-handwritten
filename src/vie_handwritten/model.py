@@ -15,11 +15,14 @@ import re
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras import layers
 
-from vie_handwritten.ctc import ctc_loss as mean_ctc_loss
+from vie_handwritten.charset import Charset
+from vie_handwritten.postprocess import CTCDecoder
+from vie_handwritten.utils import charset_path
 
 logger = logging.getLogger(__name__)
 
@@ -200,61 +203,6 @@ def set_backbone_trainable(model: keras.Model, trainable: bool) -> None:
     logger.info("Backbone %s", "trainable" if trainable else "frozen")
 
 
-class CTCTrainer(keras.Model):
-    """Training harness: wraps a CRNN (logits) model with a CTC loss train/test step.
-
-    Not a distinct architecture — it delegates ``call`` to the wrapped ``crnn`` and
-    only adds the CTC objective so the CRNN can be trained with ``fit``.
-    """
-
-    def __init__(self, crnn: keras.Model, blank_index: int = 0, **kwargs):
-        super().__init__(**kwargs)
-        self.crnn = crnn
-        self.blank_index = blank_index
-        self.loss_tracker = keras.metrics.Mean(name="loss")
-
-    def call(self, inputs, training=False):
-        images = inputs["image"] if isinstance(inputs, dict) else inputs
-        return self.crnn(images, training=training)
-
-    @property
-    def metrics(self):
-        return [self.loss_tracker]
-
-    def _ctc_loss(self, x, labels, training):
-        logits = self.crnn(x["image"], training=training)
-        # ``input_length`` (from the dataset, = real width // WIDTH_DOWNSAMPLE) is the
-        # single source of truth for valid time steps, so padded columns are excluded.
-        # Clamp to the actual T in case "same"-padding rounding makes T slightly smaller.
-        time_steps = tf.cast(tf.shape(logits)[1], x["input_length"].dtype)
-        logit_length = tf.minimum(x["input_length"], time_steps)
-        # Samples with too few time steps (T < label_length) are dropped in the data
-        # pipeline; ``ctc_loss`` additionally zeroes any non-finite per-example loss so a
-        # rare bad sample can never crash or poison a batch (cf. torch zero_infinity).
-        return mean_ctc_loss(
-            labels,
-            logits,
-            blank_index=self.blank_index,
-            label_length=x["label_length"],
-            logit_length=logit_length,
-        )
-
-    def train_step(self, data):
-        x, y = data
-        with tf.GradientTape() as tape:
-            loss = self._ctc_loss(x, y, training=True)
-        grads = tape.gradient(loss, self.crnn.trainable_variables)
-        self.optimizer.apply_gradients(zip(grads, self.crnn.trainable_variables))
-        self.loss_tracker.update_state(loss)
-        return {"loss": self.loss_tracker.result()}
-
-    def test_step(self, data):
-        x, y = data
-        loss = self._ctc_loss(x, y, training=False)
-        self.loss_tracker.update_state(loss)
-        return {"loss": self.loss_tracker.result()}
-
-
 def load_crnn_weights(model: keras.Model, checkpoint: str | Path) -> None:
     """Load CRNN weights from a ``*.weights.h5`` file."""
     ckpt = Path(checkpoint)
@@ -263,3 +211,39 @@ def load_crnn_weights(model: keras.Model, checkpoint: str | Path) -> None:
             model.load_weights(str(path))
             return
     model.load_weights(str(ckpt))
+
+
+class OCRModel:
+    """A usable OCR model: composition of the deep-learning net + postprocess.
+
+    Wraps the CRNN (produces CTC logits) together with a :class:`CTCDecoder`
+    (logits -> clean Vietnamese text), exposing a single ``recognize`` step so
+    callers never have to wire the net, charset and decoder together by hand.
+    Images passed in are expected to be already preprocessed (see ``preprocess``).
+    """
+
+    def __init__(self, net: keras.Model, charset: Charset, decoder: CTCDecoder):
+        self.net = net
+        self.charset = charset
+        self.decoder = decoder
+
+    @classmethod
+    def from_checkpoint(cls, config: dict[str, Any], checkpoint: str | Path) -> "OCRModel":
+        """Build net + decoder from config and load weights from ``checkpoint``."""
+        charset = Charset.from_file(charset_path(config))
+        net = build_crnn(config, num_classes=charset.num_classes)
+        load_crnn_weights(net, checkpoint)
+        decoder = CTCDecoder.from_config(charset, config)
+        return cls(net, charset, decoder)
+
+    def predict_logits(self, images: np.ndarray) -> np.ndarray:
+        """Forward pass: batched preprocessed images ``(B, H, W, C)`` -> logits."""
+        return self.net.predict(images, verbose=0)
+
+    def recognize(self, image_array: np.ndarray) -> str:
+        """Recognize a single preprocessed image ``(H, W, C)`` -> text."""
+        return self.decoder.decode(self.predict_logits(image_array[None, ...]))[0]
+
+    def recognize_batch(self, image_arrays: np.ndarray) -> list[str]:
+        """Recognize a batch of equal-shape preprocessed images -> list of texts."""
+        return self.decoder.decode(self.predict_logits(image_arrays))

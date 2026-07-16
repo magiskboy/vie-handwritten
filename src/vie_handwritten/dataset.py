@@ -28,17 +28,12 @@ import numpy as np
 import tensorflow as tf
 
 from vie_handwritten.preprocess import load_image, preprocess
-from vie_handwritten.utils import project_root
+from vie_handwritten.utils import abs_path
 
 logger = logging.getLogger(__name__)
 
 LINE_DIR = "HWDB_line"
 _IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff")
-
-
-def _abs_path(path: str | Path) -> Path:
-    p = Path(path)
-    return p if p.is_absolute() else project_root() / p
 
 
 def _read_writer_labels(writer_dir: Path) -> dict[str, str]:
@@ -100,14 +95,14 @@ def build_manifests(config: dict[str, Any]) -> dict[str, Path]:
     from vie_handwritten.charset import Charset
 
     data_cfg = config["data"]
-    root_dir = _abs_path(data_cfg["root_dir"])
-    manifest_dir = _abs_path(data_cfg.get("manifest_dir", "data/manifests"))
+    root_dir = abs_path(data_cfg["root_dir"])
+    manifest_dir = abs_path(data_cfg.get("manifest_dir", "data/manifests"))
     manifest_dir.mkdir(parents=True, exist_ok=True)
     val_ratio = float(data_cfg.get("val_writers_ratio", 0.1))
     drop_oov = bool(data_cfg.get("drop_oov", True))
     seed = int(config.get("project", {}).get("seed", 42))
 
-    charset = Charset.from_file(_abs_path(data_cfg["charset_path"]))
+    charset = Charset.from_file(abs_path(data_cfg["charset_path"]))
     vocab = set(charset.characters[1:])  # exclude blank at index 0
 
     train_recs = discover(root_dir, data_cfg.get("train_subdir", "train_data"))
@@ -168,7 +163,7 @@ def load_manifest(path: str | Path) -> list[dict[str, str]]:
 
 def manifest_paths(config: dict[str, Any]) -> dict[str, Path]:
     """Expected manifest paths (does not build them)."""
-    base = _abs_path(config["data"].get("manifest_dir", "data/manifests"))
+    base = abs_path(config["data"].get("manifest_dir", "data/manifests"))
     return {s: base / f"{s}.jsonl" for s in ("train", "val", "test")}
 
 
@@ -182,7 +177,7 @@ def ensure_manifests(config: dict[str, Any], *, rebuild: bool = False) -> dict[s
 
 def resolve_image_path(config: dict[str, Any], record: dict[str, str]) -> Path:
     """Absolute image path for a manifest record."""
-    return _abs_path(config["data"]["root_dir"]) / record["image"]
+    return abs_path(config["data"]["root_dir"]) / record["image"]
 
 
 def build_dataset(
@@ -200,7 +195,7 @@ def build_dataset(
     from vie_handwritten.model import WIDTH_DOWNSAMPLE
 
     pp = config["preprocess"]
-    root_dir = _abs_path(config["data"]["root_dir"])
+    root_dir = abs_path(config["data"]["root_dir"])
     height = int(pp.get("target_height", 64))
     channels = int(pp.get("channels", 3))
     batch_size = int(config["train"]["batch_size"])

@@ -82,18 +82,18 @@ def main(argv: list[str] | None = None) -> None:
         for split, path in paths.items():
             print(f"  {split}: {path}")
     elif args.command == "train":
-        from vie_handwritten.train import train
+        from vie_handwritten.trainer import train
 
         train(args.config, resume_from=args.resume, rebuild_data=args.rebuild_data)
     elif args.command == "build-lm":
-        from vie_handwritten.lm import build_lm
+        from vie_handwritten.kenlm import build_lm
         from vie_handwritten.utils import load_config
 
         paths = build_lm(load_config(args.config), order=args.order, prune=args.prune)
         for name, path in paths.items():
             print(f"  {name}: {path}")
     elif args.command == "evaluate":
-        from vie_handwritten.evaluate import evaluate
+        from vie_handwritten.eval import evaluate
 
         metrics = evaluate(
             args.config,
@@ -104,7 +104,7 @@ def main(argv: list[str] | None = None) -> None:
         )
         print(f"split={args.split} n={metrics['n']} CER={metrics['cer']:.4f} WER={metrics['wer']:.4f}")
     elif args.command == "infer":
-        from vie_handwritten.evaluate import infer
+        from vie_handwritten.eval import infer
 
         print(infer(args.config, args.checkpoint, args.image, decode=args.decode))
     elif args.command == "tune-lm":

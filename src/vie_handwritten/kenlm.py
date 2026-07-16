@@ -1,8 +1,8 @@
 """KenLM language-model training for CTC post-processing.
 
 Builds a syllable-level n-gram LM from the training-split transcripts so that
-LM-fused beam search (see :mod:`vie_handwritten.ctc`) can favour linguistically
-plausible Vietnamese output.
+LM-fused beam search (see :mod:`vie_handwritten.postprocess`) can favour
+linguistically plausible Vietnamese output.
 
 Artifacts (under the ``lm/`` dir, derived from ``ctc.lm_path``):
     corpus.txt   one NFC-normalized transcript per line (KenLM input)
@@ -24,14 +24,9 @@ from pathlib import Path
 from typing import Any
 
 from vie_handwritten.dataset import ensure_manifests, load_manifest
-from vie_handwritten.utils import project_root
+from vie_handwritten.utils import abs_path, project_root
 
 logger = logging.getLogger(__name__)
-
-
-def _abs(path: str | Path) -> Path:
-    p = Path(path)
-    return p if p.is_absolute() else project_root() / p
 
 
 def _kenlm_tools() -> tuple[dict[str, str], Path, Path]:
@@ -54,7 +49,7 @@ def _kenlm_tools() -> tuple[dict[str, str], Path, Path]:
 
 
 def _lm_dir(config: dict[str, Any]) -> Path:
-    lm_path = _abs(config.get("ctc", {}).get("lm_path", "lm/vi.binary"))
+    lm_path = abs_path(config.get("ctc", {}).get("lm_path", "lm/vi.binary"))
     return lm_path.parent
 
 
@@ -78,7 +73,7 @@ def build_unigrams(corpus_lines: list[str], config: dict[str, Any], out_path: Pa
     tokens: set[str] = set()
     for line in corpus_lines:
         tokens.update(line.split())
-    lexicon_path = _abs(config.get("ctc", {}).get("lexicon_path", "data/charset/vi_syllables.txt"))
+    lexicon_path = abs_path(config.get("ctc", {}).get("lexicon_path", "data/charset/vi_syllables.txt"))
     if lexicon_path.is_file():
         for raw in lexicon_path.read_text(encoding="utf-8").splitlines():
             tok = unicodedata.normalize("NFC", raw).strip()
@@ -100,8 +95,8 @@ def build_lm(config: dict[str, Any], *, order: int = 4, prune: int = 0) -> dict[
 
     corpus_path = lm_dir / "corpus.txt"
     arpa_path = lm_dir / "vi.arpa"
-    binary_path = _abs(config.get("ctc", {}).get("lm_path", "lm/vi.binary"))
-    unigrams_path = _abs(config.get("ctc", {}).get("unigrams_path", str(lm_dir / "unigrams.txt")))
+    binary_path = abs_path(config.get("ctc", {}).get("lm_path", "lm/vi.binary"))
+    unigrams_path = abs_path(config.get("ctc", {}).get("unigrams_path", str(lm_dir / "unigrams.txt")))
 
     lines = build_corpus(config, corpus_path)
     if not lines:

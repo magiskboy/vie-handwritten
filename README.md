@@ -49,15 +49,14 @@ src/vie_handwritten/
   cli.py          # entry point `vie-ocr` (build-data/train/build-lm/evaluate/infer/tune-lm)
   utils.py        # config I/O, seed, paths, GPU runtime
   charset.py      # bảng ký tự ↔ index
-  preprocess.py   # OpenCV + scikit-image
+  preprocess.py   # OpenCV + scikit-image (ảnh → tensor)
+  postprocess.py  # CTC decode (greedy/beam/beam_lm) + chuẩn hoá tiếng Việt; lớp CTCDecoder
   dataset.py      # discovery + manifest + tf.data (line only)
-  model.py        # ResNet-18 → BiLSTM → Linear, CTCTrainer
-  ctc.py          # CTC loss + greedy/beam/beam_lm decode (pyctcdecode + KenLM)
-  lm.py           # train KenLM n-gram LM từ transcript tập train
-  text_norm.py    # chuẩn hoá tiếng Việt (NFC, dấu thanh, dấu câu)
+  model.py        # ResNet-18 → BiLSTM → Linear + lớp composition OCRModel (net + postprocess)
+  trainer.py      # CTC loss + OCRTrainer + DecodeMetrics + train 2 phase
+  eval.py         # metrics CER/WER + evaluate/infer (dùng OCRModel)
+  kenlm.py        # train KenLM n-gram LM từ transcript tập train
   tune.py         # grid-search alpha/beta trên val
-  train.py        # train 2 phase
-  evaluate.py     # metrics + postprocess + CER/WER + infer
 ```
 
 Chạy CLI qua `make <target>`, hoặc trực tiếp `vie-ocr <command>` /

@@ -56,6 +56,17 @@ def project_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
+def abs_path(path: str | Path) -> Path:
+    """Resolve a possibly-relative path against the project root."""
+    p = Path(path)
+    return p if p.is_absolute() else project_root() / p
+
+
+def charset_path(config: dict[str, Any]) -> Path:
+    """Absolute path to the charset file declared in ``config['data']``."""
+    return abs_path(config["data"]["charset_path"])
+
+
 def configure_runtime(*, memory_growth: bool = True) -> dict:
     """Enable GPU memory growth once before any tensor allocation (CUDA/CPU)."""
     global _RUNTIME_CONFIGURED
