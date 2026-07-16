@@ -7,12 +7,11 @@ from pathlib import Path
 
 from vie_handwritten.charset import Charset
 from vie_handwritten.config import load_config
-from vie_handwritten.ctc import decode_predictions
 from vie_handwritten.dataset import discover_samples, train_val_test_split
 from vie_handwritten.metrics import evaluate_corpus
-from vie_handwritten.model import build_crnn, load_crnn_weights, pack_crnn_inputs
-from vie_handwritten.postprocess import postprocess
-from vie_handwritten.preprocess import load_image, preprocess
+from vie_handwritten.model import build_crnn, load_crnn_weights
+from vie_handwritten.pipeline import OCRPipeline
+from vie_handwritten.preprocess import load_image
 from vie_handwritten.utils import project_root
 
 logger = logging.getLogger(__name__)
@@ -55,24 +54,21 @@ def evaluate(
 
     model = build_crnn(config, num_classes=charset.num_classes)
     load_crnn_weights(model, checkpoint)
+    pipeline = OCRPipeline(model, charset, config)
 
+    batch_size = int(
+        config.get("eval", {}).get("batch_size", config["train"].get("batch_size", 16))
+    )
     refs: list[str] = []
     hyps: list[str] = []
-    ctc_cfg = config.get("ctc", {})
-    for path, text in eval_samples:
-        img = load_image(str(path))
-        arr = preprocess(img, config["preprocess"])
-        inputs = pack_crnn_inputs(arr[None, ...])
-        logits = model.predict(inputs, verbose=0)
-        pred = decode_predictions(
-            logits,
-            charset,
-            method=ctc_cfg.get("decode", "greedy"),
-            blank_index=int(ctc_cfg.get("blank_index", 0)),
-            beam_width=int(ctc_cfg.get("beam_width", 10)),
-        )[0]
-        refs.append(text)
-        hyps.append(postprocess(pred))
+    for start in range(0, len(eval_samples), batch_size):
+        chunk = eval_samples[start : start + batch_size]
+        images = [load_image(str(path)) for path, _ in chunk]
+        # predict_batch pads to a common width and already applies postprocess.
+        preds = pipeline.predict_batch(images)
+        for (_, text), pred in zip(chunk, preds):
+            refs.append(text)
+            hyps.append(pred)
 
     metrics = evaluate_corpus(refs, hyps)
     logger.info(

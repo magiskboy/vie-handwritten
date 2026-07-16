@@ -10,9 +10,14 @@ import numpy as np
 from vie_handwritten.charset import Charset
 from vie_handwritten.config import load_config
 from vie_handwritten.ctc import decode_predictions
-from vie_handwritten.model import build_crnn, load_crnn_weights, pack_crnn_inputs
+from vie_handwritten.model import (
+    WIDTH_STRIDE,
+    build_crnn,
+    load_crnn_weights,
+    pack_crnn_inputs,
+)
 from vie_handwritten.postprocess import postprocess
-from vie_handwritten.preprocess import load_image, preprocess
+from vie_handwritten.preprocess import load_image, normalized_pad_value, preprocess
 from vie_handwritten.utils import project_root
 
 
@@ -48,7 +53,10 @@ class OCRPipeline:
         """Run OCR on an in-memory image array."""
         arr = preprocess(image, self.config["preprocess"])
         batch = np.expand_dims(arr, axis=0)
-        inputs = pack_crnn_inputs(batch)
+        input_length = np.asarray(
+            [max(1, arr.shape[1] // WIDTH_STRIDE)], dtype=np.int32
+        )
+        inputs = pack_crnn_inputs(batch, input_length=input_length)
         logits = self.model.predict(inputs, verbose=0)
         ctc_cfg = self.config.get("ctc", {})
         texts = decode_predictions(
@@ -57,6 +65,7 @@ class OCRPipeline:
             method=ctc_cfg.get("decode", "greedy"),
             blank_index=int(ctc_cfg.get("blank_index", 0)),
             beam_width=int(ctc_cfg.get("beam_width", 10)),
+            input_lengths=input_length,
         )
         return postprocess(texts[0])
 
@@ -67,23 +76,23 @@ class OCRPipeline:
 
     def predict_batch(self, images: list) -> list[str]:
         """Batched inference (per-image preprocess; pad to max width)."""
-        processed = [preprocess(img, self.config["preprocess"]) for img in images]
+        preprocess_cfg = self.config["preprocess"]
+        processed = [preprocess(img, preprocess_cfg) for img in images]
         max_w = max(p.shape[1] for p in processed)
+        pad_value = normalized_pad_value(preprocess_cfg)
         batch = []
         lengths = []
         for p in processed:
             h, w, c = p.shape
-            lengths.append(max(1, w // 8))
+            lengths.append(max(1, w // WIDTH_STRIDE))
             if w < max_w:
-                canvas = np.zeros((h, max_w, c), dtype=np.float32)
+                canvas = np.full((h, max_w, c), pad_value, dtype=np.float32)
                 canvas[:, :w] = p
                 batch.append(canvas)
             else:
                 batch.append(p)
-        inputs = pack_crnn_inputs(
-            np.stack(batch, axis=0),
-            input_length=np.asarray(lengths, dtype=np.int32),
-        )
+        input_length = np.asarray(lengths, dtype=np.int32)
+        inputs = pack_crnn_inputs(np.stack(batch, axis=0), input_length=input_length)
         logits = self.model.predict(inputs, verbose=0)
         ctc_cfg = self.config.get("ctc", {})
         texts = decode_predictions(
@@ -92,5 +101,6 @@ class OCRPipeline:
             method=ctc_cfg.get("decode", "greedy"),
             blank_index=int(ctc_cfg.get("blank_index", 0)),
             beam_width=int(ctc_cfg.get("beam_width", 10)),
+            input_lengths=input_length,
         )
         return [postprocess(t) for t in texts]

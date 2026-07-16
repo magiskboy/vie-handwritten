@@ -20,8 +20,12 @@ IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 
 
 def load_image(path: str) -> np.ndarray:
-    """Load an image from disk (BGR or grayscale)."""
-    image = cv2.imread(path, cv2.IMREAD_UNCHANGED)
+    """Load an image from disk as 8-bit 3-channel BGR.
+
+    ``IMREAD_COLOR`` normalizes away alpha channels and 16-bit depth so the
+    downstream pipeline always sees a consistent uint8 array.
+    """
+    image = cv2.imread(path, cv2.IMREAD_COLOR)
     if image is None:
         raise FileNotFoundError(f"Could not read image: {path}")
     return image
@@ -85,7 +89,9 @@ def deskew(image: np.ndarray) -> np.ndarray:
         angle = 90 + angle
     if abs(angle) < 0.5 or abs(angle) > 15:
         return image
-    return (rotate(image, angle, resize=False, cval=1.0, preserve_range=True)).astype(
+    # Fill exposed corners with white (255) — the handwriting background —
+    # not black (cval=1.0 in a 0..255 range would darken the corners).
+    return (rotate(image, angle, resize=False, cval=255, preserve_range=True)).astype(
         np.uint8
     )
 
@@ -137,6 +143,18 @@ def normalize(image: np.ndarray, *, mode: str | bool = "imagenet") -> np.ndarray
     mean = IMAGENET_MEAN.reshape(1, 1, 3)
     std = IMAGENET_STD.reshape(1, 1, 3)
     return (x - mean) / std
+
+
+def normalized_pad_value(config: dict[str, Any]) -> float:
+    """Scalar pad value (approx. white) in the model's normalized space.
+
+    Must match how batches are padded during training so inference sees the
+    same padding distribution.
+    """
+    if config.get("normalize") == "imagenet":
+        white = (1.0 - IMAGENET_MEAN) / IMAGENET_STD
+        return float(white.mean())
+    return 0.0
 
 
 def to_channels(image: np.ndarray, channels: int) -> np.ndarray:

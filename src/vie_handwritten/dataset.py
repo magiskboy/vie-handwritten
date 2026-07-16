@@ -15,6 +15,7 @@ Expected on-disk layout (see ``data/vn_handwritten_images``)::
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -22,7 +23,13 @@ import numpy as np
 import tensorflow as tf
 from sklearn.model_selection import train_test_split
 
-from vie_handwritten.preprocess import load_image, preprocess
+from vie_handwritten.preprocess import (
+    load_image,
+    normalized_pad_value,
+    preprocess,
+)
+
+logger = logging.getLogger(__name__)
 
 
 def load_labels(labels_path: str | Path) -> dict[str, str]:
@@ -40,8 +47,15 @@ def discover_samples(
     *,
     images_subdir: str = "data",
     labels_file: str = "labels.json",
+    skip_missing: bool = True,
+    max_missing_ratio: float = 0.1,
 ) -> list[tuple[Path, str]]:
-    """Discover ``(image_path, transcription)`` pairs."""
+    """Discover ``(image_path, transcription)`` pairs.
+
+    Missing images are skipped with a warning when ``skip_missing`` is set, as
+    long as the fraction of missing files stays within ``max_missing_ratio``;
+    otherwise a ``FileNotFoundError`` is raised so a broken dataset fails loudly.
+    """
     dataset_dir = Path(dataset_dir)
     labels = load_labels(dataset_dir / labels_file)
     images_dir = dataset_dir / images_subdir
@@ -54,10 +68,17 @@ def discover_samples(
             continue
         samples.append((path, text))
     if missing:
-        raise FileNotFoundError(
+        ratio = len(missing) / max(1, len(labels))
+        detail = (
             f"{len(missing)} labeled images missing under {images_dir} "
             f"(e.g. {missing[:5]})"
         )
+        if not skip_missing or ratio > max_missing_ratio:
+            raise FileNotFoundError(
+                f"{detail}; missing ratio {ratio:.1%} exceeds allowed "
+                f"{max_missing_ratio:.0%}"
+            )
+        logger.warning("Skipping %s (%.1f%% of dataset)", detail, ratio * 100)
     if not samples:
         raise ValueError(f"No samples found in {dataset_dir}")
     return samples
@@ -75,9 +96,15 @@ def train_val_test_split(
     total = train_ratio + val_ratio + test_ratio
     if abs(total - 1.0) > 1e-6:
         raise ValueError(f"Split ratios must sum to 1, got {total}")
+    if val_ratio + test_ratio <= 0:
+        raise ValueError("val_split + test_split must be > 0 for evaluation")
     train_samples, temp = train_test_split(
         samples, train_size=train_ratio, random_state=seed, shuffle=True
     )
+    if test_ratio == 0:
+        return train_samples, temp, []
+    if val_ratio == 0:
+        return train_samples, [], temp
     relative_val = val_ratio / (val_ratio + test_ratio)
     val_samples, test_samples = train_test_split(
         temp, train_size=relative_val, random_state=seed, shuffle=True
@@ -193,10 +220,7 @@ def build_tf_dataset(
 
     ds = ds.map(_load_one, num_parallel_calls=tf.data.AUTOTUNE)
 
-    pad_value = 0.0
-    if preprocess_config.get("normalize") == "imagenet":
-        white = (1.0 - np.array([0.485, 0.456, 0.406])) / np.array([0.229, 0.224, 0.225])
-        pad_value = float(white.mean())
+    pad_value = normalized_pad_value(preprocess_config)
 
     channels = int(preprocess_config.get("channels", 3))
     height = int(preprocess_config.get("target_height", 64))

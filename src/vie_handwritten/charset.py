@@ -50,6 +50,15 @@ class Charset:
     def blank_index(self) -> int:
         return 0
 
+    def unknown_characters(self, texts: list[str]) -> list[str]:
+        """Return sorted characters appearing in ``texts`` but not in the charset."""
+        unknown: set[str] = set()
+        for text in texts:
+            for ch in text:
+                if ch not in self._char_to_idx:
+                    unknown.add(ch)
+        return sorted(unknown)
+
     def encode(self, text: str) -> list[int]:
         """Encode a label string to a list of class indices (no blank inserted)."""
         indices: list[int] = []

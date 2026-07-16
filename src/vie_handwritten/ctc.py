@@ -63,12 +63,26 @@ def ctc_loss(
     return _compute(y_true, y_pred, label_length, logit_length)
 
 
-def ctc_greedy_decode(logits: np.ndarray, *, blank_index: int = 0) -> list[list[int]]:
-    """Greedy CTC decode: argmax per timestep → remove blanks & collapses."""
+def ctc_greedy_decode(
+    logits: np.ndarray,
+    *,
+    blank_index: int = 0,
+    input_lengths=None,
+) -> list[list[int]]:
+    """Greedy CTC decode: argmax per timestep → remove blanks & collapses.
+
+    ``input_lengths`` (per-sample valid timesteps) truncates each sequence so
+    padded regions in a batch do not emit spurious characters.
+    """
     if logits.ndim != 3:
         raise ValueError(f"Expected logits (B, T, C), got {logits.shape}")
+    if input_lengths is not None:
+        input_lengths = np.asarray(input_lengths).reshape(-1)
     batch = []
-    for seq in logits:
+    for i, seq in enumerate(logits):
+        if input_lengths is not None:
+            valid = max(1, min(int(input_lengths[i]), seq.shape[0]))
+            seq = seq[:valid]
         idxs = np.argmax(seq, axis=-1).tolist()
         collapsed: list[int] = []
         prev = None
@@ -89,14 +103,27 @@ def ctc_beam_decode(
     *,
     blank_index: int = 0,
     beam_width: int = 10,
+    input_lengths=None,
 ) -> list[list[int]]:
-    """Beam-search CTC decode via TensorFlow (CPU-safe on Metal)."""
+    """Beam-search CTC decode via TensorFlow (CPU-safe on Metal).
+
+    ``input_lengths`` (per-sample valid timesteps) bounds the beam search so
+    padded regions in a batch are ignored.
+    """
     logits_t = tf.convert_to_tensor(logits, dtype=tf.float32)
+    max_t = tf.shape(logits_t)[1]
+    if input_lengths is None:
+        seq_len_t = tf.fill([tf.shape(logits_t)[0]], max_t)
+    else:
+        seq_len_t = tf.cast(
+            tf.reshape(tf.convert_to_tensor(input_lengths), [-1]), tf.int32
+        )
+        seq_len_t = tf.clip_by_value(seq_len_t, 1, max_t)
 
     def _decode():
         log_probs = tf.nn.log_softmax(logits_t, axis=-1)
         time_major = tf.transpose(log_probs, [1, 0, 2])
-        seq_len = tf.fill([tf.shape(logits_t)[0]], tf.shape(logits_t)[1])
+        seq_len = seq_len_t
         decoded, _ = tf.nn.ctc_beam_search_decoder(
             time_major,
             seq_len,
@@ -124,12 +151,24 @@ def decode_predictions(
     method: str = "greedy",
     blank_index: int = 0,
     beam_width: int = 10,
+    input_lengths=None,
 ) -> list[str]:
-    """Decode a batch of logits into Vietnamese text strings."""
+    """Decode a batch of logits into Vietnamese text strings.
+
+    ``input_lengths`` (per-sample valid timesteps) prevents padded regions in a
+    batch from producing spurious characters.
+    """
     if method == "beam":
-        paths = ctc_beam_decode(logits, blank_index=blank_index, beam_width=beam_width)
+        paths = ctc_beam_decode(
+            logits,
+            blank_index=blank_index,
+            beam_width=beam_width,
+            input_lengths=input_lengths,
+        )
     else:
-        paths = ctc_greedy_decode(logits, blank_index=blank_index)
+        paths = ctc_greedy_decode(
+            logits, blank_index=blank_index, input_lengths=input_lengths
+        )
     texts: list[str] = []
     for path in paths:
         texts.append(str(charset.decode(path, join=True)))

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import random
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +30,7 @@ def build_callbacks(
     checkpoint_path: Path,
     phase_name: str,
     crnn: keras.Model,
+    global_best: dict[str, float],
 ) -> list:
     """EarlyStopping, ReduceLROnPlateau, TensorBoard, and CRNN weight checkpoint."""
     train_cfg = config["train"]
@@ -36,30 +38,36 @@ def build_callbacks(
     weights_path = checkpoint_path.with_suffix(".weights.h5")
 
     class SaveCRNNWeights(keras.callbacks.Callback):
-        def __init__(self, model_to_save: keras.Model, path: Path):
+        """Save per-phase best weights, and update the global ``best.weights.h5``
+        only when ``val_loss`` improves across *all* phases."""
+
+        def __init__(self, model_to_save: keras.Model, path: Path, global_best: dict[str, float]):
             super().__init__()
             self.model_to_save = model_to_save
             self.path = path
-            self.best = float("inf")
+            self.best_path = path.parent / "best.weights.h5"
+            self.phase_best = float("inf")
+            self.global_best = global_best
 
         def on_epoch_end(self, epoch, logs=None):
             logs = logs or {}
             val_loss = logs.get("val_loss")
             if val_loss is None:
                 return
-            if val_loss < self.best:
-                self.best = float(val_loss)
+            val_loss = float(val_loss)
+            if val_loss < self.phase_best:
+                self.phase_best = val_loss
                 self.model_to_save.save_weights(str(self.path))
-                self.model_to_save.save_weights(
-                    str(self.path.parent / "best.weights.h5")
-                )
+            if val_loss < self.global_best["val_loss"]:
+                self.global_best["val_loss"] = val_loss
+                self.model_to_save.save_weights(str(self.best_path))
 
     callbacks = [
-        SaveCRNNWeights(crnn, weights_path),
+        SaveCRNNWeights(crnn, weights_path, global_best),
         keras.callbacks.EarlyStopping(
             monitor="val_loss",
             patience=int(train_cfg.get("early_stopping_patience", 10)),
-            restore_best_weights=False,
+            restore_best_weights=True,
             verbose=1,
         ),
         keras.callbacks.ReduceLROnPlateau(
@@ -130,11 +138,21 @@ def train(
     if max_samples is not None:
         if max_samples < 3:
             raise ValueError("max_samples must be >= 3 to allow train/val/test split")
-        rng = __import__("random").Random(seed)
+        rng = random.Random(seed)
         samples = list(samples)
         rng.shuffle(samples)
         samples = samples[:max_samples]
         logger.info("Using subset of %d samples (--max-samples)", len(samples))
+
+    # Fail fast on out-of-vocabulary characters rather than crashing mid-epoch
+    # inside the tf.data map when Charset.encode raises KeyError.
+    unknown = charset.unknown_characters([text for _, text in samples])
+    if unknown:
+        raise ValueError(
+            f"{len(unknown)} character(s) in labels are missing from the charset "
+            f"{charset_path}: {unknown}. Add them to the charset file (one per line) "
+            "and retry."
+        )
 
     train_s, val_s, test_s = train_val_test_split(
         samples,
@@ -173,6 +191,8 @@ def train(
     ]
 
     history_all = {}
+    # Shared across phases so best.weights.h5 tracks the globally best val_loss.
+    global_best = {"val_loss": float("inf")}
 
     for i, phase in enumerate(phases):
         phase_name = phase.get("name", f"phase_{i}")
@@ -189,7 +209,11 @@ def train(
 
         phase_ckpt = ckpt_root / f"{phase_name}.keras"
         callbacks = build_callbacks(
-            config, checkpoint_path=phase_ckpt, phase_name=phase_name, crnn=crnn
+            config,
+            checkpoint_path=phase_ckpt,
+            phase_name=phase_name,
+            crnn=crnn,
+            global_best=global_best,
         )
 
         history = ctc_model.fit(
@@ -202,10 +226,18 @@ def train(
         )
         history_all[phase_name] = history.history
 
+        # Per-phase best weights are written by SaveCRNNWeights; EarlyStopping
+        # restores the best in-memory weights so the next phase continues from
+        # the best of this phase. best.weights.h5 already holds the global best.
         weights_path = phase_ckpt.with_suffix(".weights.h5")
-        crnn.save_weights(str(weights_path))
-        crnn.save_weights(str(ckpt_root / "best.weights.h5"))
-        logger.info("Saved phase weights: %s", weights_path)
+        if not weights_path.is_file():
+            crnn.save_weights(str(weights_path))
+        logger.info(
+            "Phase %s done. Phase weights: %s (global best val_loss=%.4f)",
+            phase_name,
+            weights_path,
+            global_best["val_loss"],
+        )
 
     # Save test split paths for evaluate
     test_list = ckpt_root / "test_samples.txt"
