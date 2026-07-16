@@ -41,3 +41,9 @@ logs/
 
 # SpecStory / local agent
 .specstory/
+
+# Third-party build artifacts (KenLM built from submodule against system Boost)
+/third_party/kenlm/build/
+
+# Trained language model artifacts (rebuild with `build-lm`)
+/lm/

@@ -36,8 +36,21 @@ model:
 
 ctc:
   blank_index: 0
-  decode: greedy                 # greedy | beam
-  beam_width: 10
+  decode: greedy                 # greedy | beam | beam_lm
+  beam_width: 10                 # dùng cho beam; với beam_lm nên tăng (vd 100)
+  # --- beam_lm: beam search có tích hợp KenLM language model (post-process) ---
+  lm_path: lm/vi.binary          # KenLM trie (tạo bằng `make build-lm`)
+  lexicon_path: data/charset/vi_syllables.txt   # nguồn âm tiết cho build-lm
+  unigrams_path: lm/unigrams.txt # sinh bởi build-lm (corpus ∪ lexicon); decoder dùng
+  alpha: 0.5                     # trọng số LM (shallow fusion) — tune trên val
+  beta: 1.0                      # thưởng độ dài — tune trên val
+  token_min_logp: -5.0           # bỏ token có log-prob thấp hơn ngưỡng khi beam
+  beam_prune_logp: -10.0         # cắt beam kém hơn beam tốt nhất quá ngưỡng này
+
+# Post-process văn bản tiếng Việt sau khi decode (áp cho mọi decode method).
+postprocess:
+  nfc: true                      # chuẩn hoá Unicode NFC
+  normalize_tone_marks: true     # chuẩn hoá vị trí dấu thanh (oà→òa, thuý→thúy)
 
 train:
   batch_size: 16

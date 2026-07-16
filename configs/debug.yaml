@@ -4,7 +4,7 @@
 # nó PHẢI overfit được vài chục mẫu → train loss ~ 0 và train CER ~ 0.
 # Nếu KHÔNG hội tụ về ~0 → có bug, đừng train full vội.
 #
-#   python main.py train --config configs/debug.yaml
+#   make train CONFIG=configs/debug.yaml
 #   tensorboard --logdir runs/debug
 # Theo dõi: epoch_loss (val), train_cer, train_wer, lr, và tab TEXT/IMAGES
 # (pred vs true + ảnh input) — tất cả phải hội tụ.
