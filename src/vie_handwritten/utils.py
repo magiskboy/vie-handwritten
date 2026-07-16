@@ -1,20 +1,37 @@
-"""Shared helpers (I/O, seeding, paths, GPU runtime)."""
+"""Shared helpers: config I/O, seeding, paths, GPU runtime."""
 
 from __future__ import annotations
 
 import logging
 import os
-import platform
 import random
-import sys
 from pathlib import Path
 from typing import Any
 
 import numpy as np
+import yaml
 
 logger = logging.getLogger(__name__)
 
 _RUNTIME_CONFIGURED = False
+
+
+def load_config(path: str | Path) -> dict[str, Any]:
+    """Load a YAML config file into a nested dict."""
+    path = Path(path)
+    with path.open(encoding="utf-8") as f:
+        config = yaml.safe_load(f)
+    if not isinstance(config, dict):
+        raise ValueError(f"Config must be a mapping: {path}")
+    return config
+
+
+def save_config(config: dict[str, Any], path: str | Path) -> None:
+    """Write config dict back to YAML."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as f:
+        yaml.safe_dump(config, f, allow_unicode=True, sort_keys=False)
 
 
 def set_seed(seed: int) -> None:
@@ -39,80 +56,31 @@ def project_root() -> Path:
     return Path(__file__).resolve().parents[2]
 
 
-def count_parameters(model: Any) -> int:
-    """Return number of trainable parameters."""
-    return int(sum(int(np.prod(w.shape)) for w in model.trainable_weights))
-
-
 def configure_runtime(*, memory_growth: bool = True) -> dict:
-    """Configure TensorFlow devices before any model/tensor allocation.
-
-    - macOS Apple Silicon: expects ``tensorflow-metal`` PluggableDevice.
-    - Linux NVIDIA: uses all visible CUDA GPUs without a memory cap.
-    - Enables memory growth on every GPU when requested.
-    """
+    """Enable GPU memory growth once before any tensor allocation (CUDA/CPU)."""
     global _RUNTIME_CONFIGURED
-    if _RUNTIME_CONFIGURED:
-        return _runtime_info()
-
     import tensorflow as tf
 
     gpus = tf.config.list_physical_devices("GPU")
     info = {
-        "platform": sys.platform,
-        "machine": platform.machine(),
         "tensorflow": tf.__version__,
         "gpu_count": len(gpus),
         "gpus": [gpu.name for gpu in gpus],
-        "backend": _detect_backend(gpus),
     }
+    if _RUNTIME_CONFIGURED:
+        return info
 
     if gpus and memory_growth:
         try:
             for gpu in gpus:
                 tf.config.experimental.set_memory_growth(gpu, True)
-            logger.info("Enabled memory growth on %d GPU(s)", len(gpus))
         except RuntimeError as exc:
             logger.warning("Could not set GPU memory growth: %s", exc)
 
-    if info["backend"] == "cpu":
-        logger.warning(
-            "No GPU detected (platform=%s machine=%s). Training will use CPU. "
-            "On Apple Silicon install tensorflow-metal; on Linux NVIDIA ensure "
-            "CUDA is available (try: pip install 'tensorflow[and-cuda]').",
-            info["platform"],
-            info["machine"],
-        )
+    if gpus:
+        logger.info("TensorFlow %s using %d GPU(s): %s", tf.__version__, len(gpus), info["gpus"])
     else:
-        logger.info(
-            "TensorFlow %s using %s (%d device(s)): %s",
-            info["tensorflow"],
-            info["backend"],
-            info["gpu_count"],
-            info["gpus"],
-        )
+        logger.warning("No GPU detected — training will run on CPU.")
 
     _RUNTIME_CONFIGURED = True
     return info
-
-
-def _detect_backend(gpus: list) -> str:
-    if not gpus:
-        return "cpu"
-    if sys.platform == "darwin":
-        return "metal"
-    return "cuda"
-
-
-def _runtime_info() -> dict:
-    import tensorflow as tf
-
-    gpus = tf.config.list_physical_devices("GPU")
-    return {
-        "platform": sys.platform,
-        "machine": platform.machine(),
-        "tensorflow": tf.__version__,
-        "gpu_count": len(gpus),
-        "gpus": [gpu.name for gpu in gpus],
-        "backend": _detect_backend(gpus),
-    }

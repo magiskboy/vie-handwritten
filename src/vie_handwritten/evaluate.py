@@ -1,25 +1,96 @@
-"""Evaluation helpers (CER / WER on a data split)."""
+"""Evaluation + inference: text metrics, post-processing, CER/WER, and OCR.
+
+Consolidates what used to be ``metrics.py``, ``postprocess.py`` and
+``pipeline.py`` so the whole "logits → text → score" path lives in one place.
+"""
 
 from __future__ import annotations
 
 import logging
+import random
+import re
 from pathlib import Path
+from typing import Any
+
+import editdistance
 
 from vie_handwritten.charset import Charset
-from vie_handwritten.config import load_config
 from vie_handwritten.ctc import decode_predictions
-from vie_handwritten.dataset import (
-    ensure_source_manifests,
-    load_manifest,
-    resolve_image_path,
-)
-from vie_handwritten.metrics import evaluate_corpus
+from vie_handwritten.dataset import ensure_manifests, load_manifest, resolve_image_path
 from vie_handwritten.model import build_crnn, load_crnn_weights
-from vie_handwritten.postprocess import postprocess
 from vie_handwritten.preprocess import load_image, preprocess
-from vie_handwritten.utils import project_root
+from vie_handwritten.utils import load_config, project_root
 
 logger = logging.getLogger(__name__)
+
+
+# --------------------------------------------------------------------------- #
+# Text post-processing
+# --------------------------------------------------------------------------- #
+def postprocess(text: str) -> str:
+    """Collapse whitespace runs to a single space and strip."""
+    return re.sub(r"\s+", " ", text).strip()
+
+
+# --------------------------------------------------------------------------- #
+# Metrics (edit distance)
+# --------------------------------------------------------------------------- #
+def character_error_rate(reference: str, hypothesis: str) -> float:
+    if len(reference) == 0:
+        return 0.0 if len(hypothesis) == 0 else 1.0
+    return editdistance.eval(reference, hypothesis) / len(reference)
+
+
+def word_error_rate(reference: str, hypothesis: str) -> float:
+    ref_words, hyp_words = reference.split(), hypothesis.split()
+    if len(ref_words) == 0:
+        return 0.0 if len(hyp_words) == 0 else 1.0
+    return editdistance.eval(ref_words, hyp_words) / len(ref_words)
+
+
+def evaluate_corpus(references: list[str], hypotheses: list[str]) -> dict[str, float]:
+    """Aggregate CER / WER over paired reference/hypothesis strings."""
+    if not references:
+        return {"cer": 0.0, "wer": 0.0, "n": 0}
+    cer = sum(character_error_rate(r, h) for r, h in zip(references, hypotheses))
+    wer = sum(word_error_rate(r, h) for r, h in zip(references, hypotheses))
+    n = len(references)
+    return {"cer": cer / n, "wer": wer / n, "n": n}
+
+
+# --------------------------------------------------------------------------- #
+# Inference
+# --------------------------------------------------------------------------- #
+def _charset_path(config: dict[str, Any]) -> Path:
+    p = Path(config["data"]["charset_path"])
+    return p if p.is_absolute() else project_root() / p
+
+
+def predict_image_array(crnn, image, charset: Charset, config: dict[str, Any]) -> str:
+    """Run OCR on an in-memory image array → decoded, post-processed text."""
+    arr = preprocess(image, config["preprocess"])
+    logits = crnn.predict(arr[None, ...], verbose=0)
+    ctc_cfg = config.get("ctc", {})
+    pred = decode_predictions(
+        logits,
+        charset,
+        method=ctc_cfg.get("decode", "greedy"),
+        blank_index=int(ctc_cfg.get("blank_index", 0)),
+        beam_width=int(ctc_cfg.get("beam_width", 10)),
+    )[0]
+    return postprocess(pred)
+
+
+def evaluate_split(
+    crnn, records: list[dict[str, str]], charset: Charset, config: dict[str, Any]
+) -> dict[str, float]:
+    """Decode every record with the in-memory CRNN → CER/WER metrics."""
+    refs, hyps = [], []
+    for rec in records:
+        image = load_image(str(resolve_image_path(config, rec)))
+        hyps.append(predict_image_array(crnn, image, charset, config))
+        refs.append(rec["text"])
+    return evaluate_corpus(refs, hyps)
 
 
 def evaluate(
@@ -27,64 +98,30 @@ def evaluate(
     checkpoint: str | Path,
     *,
     split: str = "test",
-    source: str | None = None,
     max_samples: int | None = None,
 ) -> dict[str, float]:
-    """Evaluate a checkpoint on a manifest split and return CER/WER metrics.
-
-    ``source`` optionally restricts to one source (e.g. ``line``); defaults to
-    ``data.eval_source`` in the config, else all sources in the split.
-    """
+    """Load a checkpoint and evaluate CER/WER on a manifest split."""
     config = load_config(config_path)
-    charset_path = Path(config["data"]["charset_path"])
-    if not charset_path.is_absolute():
-        charset_path = project_root() / charset_path
-
-    charset = Charset.from_file(charset_path)
-    source = source or config["data"].get("eval_source")
-    if not source:
-        raise ValueError(
-            "evaluate needs a source (pass --source or set data.eval_source): "
-            "manifests are now per-source"
-        )
-    manifests = ensure_source_manifests(config, source)
+    charset = Charset.from_file(_charset_path(config))
+    manifests = ensure_manifests(config)
     if split not in manifests:
         raise ValueError(f"Unknown split={split}")
     records = load_manifest(manifests[split])
-
     if max_samples is not None and len(records) > max_samples:
-        import random
-
         seed = int(config.get("project", {}).get("seed", 42))
         records = random.Random(seed).sample(records, max_samples)
 
-    model = build_crnn(config, num_classes=charset.num_classes)
-    load_crnn_weights(model, checkpoint)
-
-    refs: list[str] = []
-    hyps: list[str] = []
-    ctc_cfg = config.get("ctc", {})
-    for record in records:
-        text = record["text"]
-        img = load_image(str(resolve_image_path(config, record)))
-        arr = preprocess(img, config["preprocess"])
-        logits = model.predict(arr[None, ...], verbose=0)
-        pred = decode_predictions(
-            logits,
-            charset,
-            method=ctc_cfg.get("decode", "greedy"),
-            blank_index=int(ctc_cfg.get("blank_index", 0)),
-            beam_width=int(ctc_cfg.get("beam_width", 10)),
-        )[0]
-        refs.append(text)
-        hyps.append(postprocess(pred))
-
-    metrics = evaluate_corpus(refs, hyps)
-    logger.info(
-        "split=%s n=%s CER=%.4f WER=%.4f",
-        split,
-        metrics["n"],
-        metrics["cer"],
-        metrics["wer"],
-    )
+    crnn = build_crnn(config, num_classes=charset.num_classes)
+    load_crnn_weights(crnn, checkpoint)
+    metrics = evaluate_split(crnn, records, charset, config)
+    logger.info("split=%s n=%s CER=%.4f WER=%.4f", split, metrics["n"], metrics["cer"], metrics["wer"])
     return metrics
+
+
+def infer(config_path: str | Path, checkpoint: str | Path, image_path: str | Path) -> str:
+    """Run OCR on a single image file and return the decoded text."""
+    config = load_config(config_path)
+    charset = Charset.from_file(_charset_path(config))
+    crnn = build_crnn(config, num_classes=charset.num_classes)
+    load_crnn_weights(crnn, checkpoint)
+    return predict_image_array(crnn, load_image(str(image_path)), charset, config)

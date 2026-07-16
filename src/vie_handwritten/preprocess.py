@@ -1,10 +1,10 @@
 """Image preprocessing for Vietnamese handwriting OCR.
 
-Stack: OpenCV (CLAHE, threshold, morphology) + scikit-image (deskew / resize).
+Stack: OpenCV (CLAHE) + scikit-image (deskew / resize).
 
 Pipeline:
-  load → grayscale → CLAHE → (optional) adaptive threshold + morphology
-       → deskew → resize height (keep aspect) → pad → RGB×3 → ImageNet normalize
+  load → grayscale → CLAHE → deskew → resize height (keep aspect)
+       → pad → RGB×3 → ImageNet normalize
 """
 
 from __future__ import annotations
@@ -49,28 +49,6 @@ def apply_clahe(
     """Contrast Limited Adaptive Histogram Equalization (OpenCV)."""
     clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=tile_grid_size)
     return clahe.apply(image)
-
-
-def binarize(image: np.ndarray, *, method: str = "adaptive") -> np.ndarray:
-    """Binarize handwriting strokes (adaptive / Otsu)."""
-    if method == "otsu":
-        _, out = cv2.threshold(image, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        return out
-    return cv2.adaptiveThreshold(
-        image,
-        255,
-        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-        cv2.THRESH_BINARY,
-        31,
-        10,
-    )
-
-
-def denoise_morphology(image: np.ndarray) -> np.ndarray:
-    """Morphological open / dilate to clean stroke noise."""
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
-    opened = cv2.morphologyEx(image, cv2.MORPH_OPEN, kernel)
-    return cv2.dilate(opened, kernel, iterations=1)
 
 
 def deskew(image: np.ndarray) -> np.ndarray:
@@ -164,9 +142,6 @@ def preprocess(image: np.ndarray, config: dict[str, Any]) -> np.ndarray:
             clip_limit=float(config.get("clahe_clip_limit", 2.0)),
             tile_grid_size=(int(tile[0]), int(tile[1])),
         )
-    if config.get("use_adaptive_threshold", False):
-        gray = binarize(gray, method="adaptive")
-        gray = denoise_morphology(gray)
     gray = deskew(gray)
     gray = resize_keep_aspect(
         gray,
