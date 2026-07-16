@@ -257,7 +257,14 @@ def build_transformer_head(
         raise ValueError(f"d_model={d_model} must be divisible by heads={num_heads}")
 
     x = layers.Dense(d_model, name="seq_proj")(features)
+    # Normalize the projected features to ~unit scale so the fixed sinusoidal
+    # positional encoding (amplitude ~1) contributes a comparable, meaningful
+    # signal. (Raw ``* sqrt(d_model)`` scaling is meant for tied token
+    # embeddings and would instead swamp the fixed PE for CNN features here.)
+    x = layers.LayerNormalization(epsilon=1e-6, name="seq_ln")(x)
     x = SinusoidalPositionalEncoding(d_model, name="pos_encoding")(x)
+    # Embedding dropout on (features + PE), as in the original Transformer.
+    x = layers.Dropout(dropout, name="embed_dropout")(x)
 
     # (B, 1, T): each query attends only to valid (non-pad) keys
     def _attention_mask(args):
@@ -352,7 +359,9 @@ STAGE_PREFIXES = {
 # Sequence head layers kept trainable during backbone freeze phases.
 SEQUENCE_HEAD_PREFIXES = (
     "seq_proj",
+    "seq_ln",
     "pos_encoding",
+    "embed_dropout",
     "attention_mask",
     "transformer_",
     "logits",

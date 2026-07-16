@@ -172,8 +172,60 @@ def to_channels(image: np.ndarray, channels: int) -> np.ndarray:
     raise ValueError(f"Unsupported channels={channels}")
 
 
-def preprocess(image: np.ndarray, config: dict[str, Any]) -> np.ndarray:
-    """Full preprocess chain → model-ready array ``(H, W, C)``."""
+def augment_grayscale(image: np.ndarray, aug: dict[str, Any]) -> np.ndarray:
+    """Random light augmentation for handwriting (train only).
+
+    Operates on a uint8 grayscale image with a white (255) background.
+    """
+    out = image
+    h, w = out.shape[:2]
+
+    rotate_deg = float(aug.get("rotate_deg", 0.0))
+    shear = float(aug.get("shear", 0.0))
+    scale_jitter = float(aug.get("scale", 0.0))
+    if rotate_deg or shear or scale_jitter:
+        angle = np.random.uniform(-rotate_deg, rotate_deg)
+        scale = 1.0 + np.random.uniform(-scale_jitter, scale_jitter)
+        matrix = cv2.getRotationMatrix2D((w / 2.0, h / 2.0), angle, scale)
+        matrix[0, 1] += np.random.uniform(-shear, shear)
+        out = cv2.warpAffine(
+            out,
+            matrix,
+            (w, h),
+            flags=cv2.INTER_LINEAR,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=255,
+        )
+
+    # Stroke-width jitter via morphology (erode thickens dark strokes).
+    if np.random.rand() < float(aug.get("stroke_prob", 0.0)):
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
+        if np.random.rand() < 0.5:
+            out = cv2.erode(out, kernel, iterations=1)
+        else:
+            out = cv2.dilate(out, kernel, iterations=1)
+
+    brightness = float(aug.get("brightness", 0.0))
+    if brightness:
+        factor = 1.0 + np.random.uniform(-brightness, brightness)
+        out = np.clip(out.astype(np.float32) * factor, 0, 255).astype(np.uint8)
+
+    noise_std = float(aug.get("noise_std", 0.0))
+    if noise_std > 0:
+        noise = np.random.normal(0.0, noise_std, out.shape).astype(np.float32)
+        out = np.clip(out.astype(np.float32) + noise, 0, 255).astype(np.uint8)
+
+    return out
+
+
+def preprocess(
+    image: np.ndarray, config: dict[str, Any], *, training: bool = False
+) -> np.ndarray:
+    """Full preprocess chain → model-ready array ``(H, W, C)``.
+
+    When ``training`` is set and ``config['augment']['enabled']`` is true, light
+    random augmentation is applied to the resized grayscale image.
+    """
     gray = to_grayscale(image)
     if config.get("use_clahe", True):
         tile = config.get("clahe_tile_grid", [8, 8])
@@ -191,6 +243,9 @@ def preprocess(image: np.ndarray, config: dict[str, Any]) -> np.ndarray:
         target_height=int(config.get("target_height", 64)),
         max_width=config.get("max_width"),
     )
+    aug = config.get("augment")
+    if training and aug and aug.get("enabled"):
+        gray = augment_grayscale(gray, aug)
     channels = int(config.get("channels", 3))
     arr = to_channels(gray, channels)
     norm_mode = config.get("normalize", "imagenet")

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import random
 from pathlib import Path
 from typing import Any
@@ -22,6 +23,90 @@ from vie_handwritten.model import (
 from vie_handwritten.utils import configure_runtime, ensure_dir, project_root, set_seed
 
 logger = logging.getLogger(__name__)
+
+
+@keras.utils.register_keras_serializable(package="vie_handwritten")
+class WarmUpCosine(keras.optimizers.schedules.LearningRateSchedule):
+    """Linear warmup for ``warmup_steps`` then cosine decay to ``min_lr``.
+
+    Transformers trained from scratch are unstable under Adam without warmup;
+    this schedule ramps the LR up gently before annealing it.
+    """
+
+    def __init__(
+        self,
+        peak_lr: float,
+        total_steps: int,
+        warmup_steps: int,
+        min_lr: float = 0.0,
+    ) -> None:
+        super().__init__()
+        self.peak_lr = float(peak_lr)
+        self.total_steps = int(total_steps)
+        self.warmup_steps = int(warmup_steps)
+        self.min_lr = float(min_lr)
+
+    def __call__(self, step):
+        step = tf.cast(step, tf.float32)
+        warmup = tf.maximum(1.0, float(self.warmup_steps))
+        total = tf.maximum(warmup + 1.0, float(self.total_steps))
+        peak = self.peak_lr
+        warmup_lr = peak * (step / warmup)
+        progress = tf.clip_by_value((step - warmup) / (total - warmup), 0.0, 1.0)
+        cosine_lr = self.min_lr + 0.5 * (peak - self.min_lr) * (
+            1.0 + tf.cos(math.pi * progress)
+        )
+        return tf.where(step < warmup, warmup_lr, cosine_lr)
+
+    def get_config(self) -> dict[str, Any]:
+        return {
+            "peak_lr": self.peak_lr,
+            "total_steps": self.total_steps,
+            "warmup_steps": self.warmup_steps,
+            "min_lr": self.min_lr,
+        }
+
+
+def make_learning_rate(config: dict[str, Any], *, peak_lr: float, total_steps: int):
+    """Return a float LR or a ``WarmUpCosine`` schedule based on config."""
+    train_cfg = config["train"]
+    kind = str(train_cfg.get("lr_schedule", "constant")).lower()
+    if kind in ("constant", "none", "") or total_steps <= 1:
+        return peak_lr
+    warmup_ratio = float(train_cfg.get("warmup_ratio", 0.1))
+    warmup_steps = max(1, int(total_steps * warmup_ratio))
+    min_lr = peak_lr * float(train_cfg.get("min_lr_ratio", 0.01))
+    return WarmUpCosine(
+        peak_lr=peak_lr,
+        total_steps=total_steps,
+        warmup_steps=warmup_steps,
+        min_lr=min_lr,
+    )
+
+
+def build_optimizer(config: dict[str, Any], *, learning_rate):
+    """Build the optimizer (adam / adamw / sgd) with optional gradient clipping."""
+    train_cfg = config["train"]
+    opt_name = str(train_cfg.get("optimizer", "adam")).lower()
+    kwargs: dict[str, Any] = {}
+    clip_norm = train_cfg.get("grad_clip_norm")
+    if clip_norm:
+        kwargs["global_clipnorm"] = float(clip_norm)
+
+    if opt_name == "adamw":
+        return keras.optimizers.AdamW(
+            learning_rate=learning_rate,
+            weight_decay=float(train_cfg.get("weight_decay", 1e-4)),
+            **kwargs,
+        )
+    if opt_name == "sgd":
+        return keras.optimizers.SGD(learning_rate=learning_rate, momentum=0.9, **kwargs)
+    return keras.optimizers.Adam(learning_rate=learning_rate, **kwargs)
+
+
+def _uses_lr_schedule(config: dict[str, Any]) -> bool:
+    kind = str(config["train"].get("lr_schedule", "constant")).lower()
+    return kind not in ("constant", "none", "")
 
 
 def build_callbacks(
@@ -70,27 +155,31 @@ def build_callbacks(
             restore_best_weights=True,
             verbose=1,
         ),
-        keras.callbacks.ReduceLROnPlateau(
-            monitor="val_loss",
-            factor=float(train_cfg.get("reduce_lr_factor", 0.5)),
-            patience=int(train_cfg.get("reduce_lr_patience", 5)),
-            min_lr=1e-6,
-            verbose=1,
-        ),
         keras.callbacks.TensorBoard(log_dir=str(log_dir)),
     ]
+    # ReduceLROnPlateau cannot coexist with a LearningRateSchedule (the schedule
+    # already anneals the LR from the optimizer's step count). Only add it when
+    # the LR is a plain constant.
+    if not _uses_lr_schedule(config):
+        callbacks.insert(
+            2,
+            keras.callbacks.ReduceLROnPlateau(
+                monitor="val_loss",
+                factor=float(train_cfg.get("reduce_lr_factor", 0.5)),
+                patience=int(train_cfg.get("reduce_lr_patience", 5)),
+                min_lr=1e-6,
+                verbose=1,
+            ),
+        )
     return callbacks
 
 
-def compile_model(model: CTCModel, config: dict[str, Any], *, learning_rate: float) -> CTCModel:
-    """Attach optimizer and compile the CTC wrapper model."""
-    opt_name = str(config["train"].get("optimizer", "adam")).lower()
-    if opt_name == "adam":
-        optimizer = keras.optimizers.Adam(learning_rate=learning_rate)
-    elif opt_name == "sgd":
-        optimizer = keras.optimizers.SGD(learning_rate=learning_rate, momentum=0.9)
-    else:
-        optimizer = keras.optimizers.Adam(learning_rate=learning_rate)
+def compile_model(model: CTCModel, config: dict[str, Any], *, learning_rate) -> CTCModel:
+    """Attach optimizer and compile the CTC wrapper model.
+
+    ``learning_rate`` may be a float or a ``LearningRateSchedule``.
+    """
+    optimizer = build_optimizer(config, learning_rate=learning_rate)
     model.compile(optimizer=optimizer)
     return model
 
@@ -193,6 +282,8 @@ def train(
     history_all = {}
     # Shared across phases so best.weights.h5 tracks the globally best val_loss.
     global_best = {"val_loss": float("inf")}
+    batch_size = int(config["train"]["batch_size"])
+    steps_per_epoch = max(1, math.ceil(len(train_s) / batch_size))
 
     for i, phase in enumerate(phases):
         phase_name = phase.get("name", f"phase_{i}")
@@ -201,8 +292,19 @@ def train(
         # Transformer sequence head + logits always trainable
         set_sequence_head_trainable(crnn, trainable=True)
 
-        lr = float(phase["learning_rate"])
+        peak_lr = float(phase["learning_rate"])
+        total_steps = steps_per_epoch * int(phase["epochs"])
+        # A fresh optimizer is created per phase, so its step count restarts at 0
+        # and the per-phase schedule (warmup + cosine) lines up with the phase.
+        lr = make_learning_rate(config, peak_lr=peak_lr, total_steps=total_steps)
         compile_model(ctc_model, config, learning_rate=lr)
+        logger.info(
+            "Phase %s LR: peak=%.2e schedule=%s (%d steps/epoch)",
+            phase_name,
+            peak_lr,
+            config["train"].get("lr_schedule", "constant"),
+            steps_per_epoch,
+        )
 
         trainable = sum(int(tf.size(w)) for w in crnn.trainable_weights)
         logger.info("Trainable parameters: %s", f"{trainable:,}")

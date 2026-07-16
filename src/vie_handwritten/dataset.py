@@ -186,7 +186,7 @@ def build_tf_dataset(
             p = path_bytes.numpy().decode("utf-8")
             t = text_bytes.numpy().decode("utf-8")
             img = load_image(p)
-            arr = preprocess(img, preprocess_config)
+            arr = preprocess(img, preprocess_config, training=training)
             encoded = charset.encode(t)
             return (
                 arr.astype(np.float32),

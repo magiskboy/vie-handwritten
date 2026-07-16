@@ -29,6 +29,15 @@ preprocess:
   use_adaptive_threshold: false
   normalize: imagenet  # ImageNet mean/std (or true for [0,1])
   channels: 3
+  # Light train-time augmentation (compensates for the small dataset)
+  augment:
+    enabled: true
+    rotate_deg: 2.0     # random rotation ±deg
+    shear: 0.05         # x-shear factor
+    scale: 0.05         # random zoom ±fraction
+    stroke_prob: 0.3    # chance of erode/dilate (stroke-width jitter)
+    brightness: 0.1     # random brightness ±fraction
+    noise_std: 5.0      # gaussian noise std (0..255 scale)
 
 model:
   backbone: resnet18
@@ -41,7 +50,7 @@ model:
   transformer_layers: 4
   transformer_heads: 4
   transformer_ffn_dim: 1024  # 4 * d_model
-  dropout: 0.1
+  dropout: 0.2  # higher regularization for the small dataset
 
 ctc:
   blank_index: 0  # matches tf.nn.ctc_loss default unless overridden
@@ -50,8 +59,16 @@ ctc:
 
 train:
   batch_size: 16
-  optimizer: adam
+  optimizer: adamw  # adam | adamw | sgd
+  weight_decay: 0.0001  # used by adamw
+  grad_clip_norm: 1.0  # global gradient-norm clipping (Transformer stability)
+  # Learning-rate schedule: constant | warmup_cosine
+  # warmup_cosine ramps LR up over warmup_ratio of steps, then cosine-decays.
+  lr_schedule: warmup_cosine
+  warmup_ratio: 0.1   # fraction of each phase's steps used for warmup
+  min_lr_ratio: 0.01  # final LR = min_lr_ratio * peak LR
   early_stopping_patience: 10
+  # reduce_lr_* only used when lr_schedule=constant
   reduce_lr_patience: 5
   reduce_lr_factor: 0.5
   checkpoint_dir: checkpoints
@@ -61,7 +78,7 @@ train:
   phases:
     - name: a_head
       epochs: 40
-      learning_rate: 0.001
+      learning_rate: 0.0003  # peak LR for head-only phase (warmup applied)
       freeze_backbone: true
     - name: b_finetune
       epochs: 60
