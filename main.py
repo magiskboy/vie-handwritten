@@ -26,6 +26,13 @@ def build_parser() -> argparse.ArgumentParser:
     data_p = sub.add_parser("build-data", help="Build normalized JSONL manifests")
     data_p.add_argument("--config", default="configs/default.yaml")
     data_p.add_argument("--rebuild", action="store_true", help="Rebuild manifests")
+    data_p.add_argument(
+        "--sources",
+        nargs="+",
+        default=None,
+        choices=["line", "word", "paragraph"],
+        help="Override data.sources (e.g. --sources line to drop word)",
+    )
 
     train_p = sub.add_parser("train", help="Train CRNN model")
     train_p.add_argument("--config", default="configs/default.yaml")
@@ -73,7 +80,10 @@ def main(argv: list[str] | None = None) -> None:
         from vie_handwritten.config import load_config
         from vie_handwritten.dataset import build_manifests
 
-        paths = build_manifests(load_config(args.config))
+        config = load_config(args.config)
+        if args.sources:
+            config["data"]["sources"] = args.sources
+        paths = build_manifests(config)
         summary_file = paths["train"].parent / "summary.json"
         if summary_file.is_file():
             summary = json.loads(summary_file.read_text(encoding="utf-8"))

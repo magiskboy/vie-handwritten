@@ -13,7 +13,7 @@ data:
   # paragraph (ảnh nguyên trang) hiện KHÔNG dùng để train.
   root_dir: data/images
   manifest_dir: data/manifests
-  sources: [line, word]          # nguồn dùng để train CRNN
+  sources: [line]                # chỉ dùng line (bỏ word). Thêm 'word' để bật lại.
   val_sources: [line]            # val theo mục tiêu triển khai (đọc dòng)
   eval_source: line              # evaluate mặc định trên line
   train_subdir: train_data
@@ -24,7 +24,7 @@ data:
   charset_path: data/charset/vietnamese.txt
   processed_dir: data/processed
   # Trọng số trộn nguồn mặc định (có thể override theo từng pha ở train.phases)
-  source_weights: {line: 0.5, word: 0.5}
+  source_weights: {line: 1.0}
 
 preprocess:
   target_height: 64
@@ -66,20 +66,18 @@ train:
   mixed_precision: false
   phases:
     # Pha A — warmup/head: đóng băng backbone (ImageNet), chỉ train BiLSTM+Dense.
-    # Nghiêng về word (110k ảnh, ngắn) để học nhanh ánh xạ đặc trưng→ký tự.
     - name: a_warmup
       epochs: 15
       learning_rate: 0.001
       freeze_backbone: true
-      source_weights: {word: 0.7, line: 0.3}
+      source_weights: {line: 1.0}
     # Pha B — finetune: mở băng từ layer3 (giữ stem/layer1/layer2), LR nhỏ.
-    # Nghiêng về line để chuyên hoá đọc dòng dài / khoảng trắng / ngữ cảnh.
     - name: b_finetune
       epochs: 40
       learning_rate: 0.0001
       freeze_backbone: false
       unfreeze_from: layer3
-      source_weights: {line: 0.85, word: 0.15}
+      source_weights: {line: 1.0}
 
 eval:
   metrics: [cer, wer]  # Character / Word Error Rate
