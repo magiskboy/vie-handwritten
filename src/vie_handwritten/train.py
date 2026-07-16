@@ -46,10 +46,14 @@ class SaveBest(keras.callbacks.Callback):
             self.crnn.save_weights(str(self.path))
 
 
-def _make_optimizer(name: str, learning_rate: float):
+def _make_optimizer(name: str, learning_rate: float, clipnorm: float | None = None):
+    # Gradient clipping tames the occasional CTC/RNN loss spikes from hard (long) lines.
+    kwargs: dict[str, Any] = {"learning_rate": learning_rate}
+    if clipnorm is not None:
+        kwargs["clipnorm"] = float(clipnorm)
     if name.lower() == "sgd":
-        return keras.optimizers.SGD(learning_rate=learning_rate, momentum=0.9)
-    return keras.optimizers.Adam(learning_rate=learning_rate)
+        return keras.optimizers.SGD(momentum=0.9, **kwargs)
+    return keras.optimizers.Adam(**kwargs)
 
 
 def _subsample(records: list[dict], n: int | None, seed: int) -> list[dict]:
@@ -103,6 +107,7 @@ def train(
     best_path = ckpt_root / "best.weights.h5"
     save_best = SaveBest(crnn, best_path)
     optimizer_name = str(config["train"].get("optimizer", "adam"))
+    clipnorm = config["train"].get("grad_clipnorm")
 
     phases = [
         ("phase1", config["train"]["phase1"], False),  # freeze backbone
@@ -111,7 +116,7 @@ def train(
     for name, pcfg, backbone_trainable in phases:
         logger.info("################ %s (backbone_trainable=%s) ################", name, backbone_trainable)
         set_backbone_trainable(crnn, backbone_trainable)
-        trainer.compile(optimizer=_make_optimizer(optimizer_name, float(pcfg["learning_rate"])))
+        trainer.compile(optimizer=_make_optimizer(optimizer_name, float(pcfg["learning_rate"]), clipnorm))
 
         records = _subsample(train_records, pcfg.get("max_train_samples"), seed)
         logger.info("[%s] training on %d samples", name, len(records))

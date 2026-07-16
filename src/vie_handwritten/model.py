@@ -24,10 +24,12 @@ from vie_handwritten.ctc import ctc_loss as mean_ctc_loss
 logger = logging.getLogger(__name__)
 
 # Width downsampling of the CNN backbone = product of width strides:
-#   stem_conv (2) · stem_pool (2) · layer2 (2) · layer3 width-stride (1) · layer4 (1) = 8.
+#   stem_conv (2) · stem_pool (2) · layer2 width-stride (1) · layer3 (1) · layer4 (1) = 4.
+# Kept at 4 (not 8) so CTC gets ~2× the time steps: long Vietnamese lines need
+# T ≳ 2·label_length or the model drops characters (measured T/L < 1.7 → deletions).
 # This is the single source of truth for how image width maps to CTC time steps
 # (T ≈ width / WIDTH_DOWNSAMPLE); the dataset uses it to derive ``input_length``.
-WIDTH_DOWNSAMPLE = 8
+WIDTH_DOWNSAMPLE = 4
 
 # Match keras_hub ResNet so transferred ImageNet moving stats stay valid under our
 # forward pass (Keras BatchNormalization defaults are momentum=0.99, epsilon=1e-3).
@@ -56,9 +58,11 @@ def _basic_block(x, filters: int, *, strides: tuple[int, int] = (1, 1), name: st
 
 
 def build_cnn_backbone(input_tensor):
-    """ResNet-18 feature extractor with HTR strides (width downsample ≈ 1/8).
+    """ResNet-18 feature extractor with HTR strides (width downsample ≈ 1/4).
 
-    layer3 uses stride (2, 1) and layer4 stride (1, 1) to preserve width for CTC.
+    Width is downsampled only by the stem (stem_conv ·2, stem_pool ·2); layer2/3/4
+    keep width-stride 1 so CTC retains enough time steps. Height is still downsampled
+    by layer2 (2,2) and layer3 (2,1). See ``WIDTH_DOWNSAMPLE``.
     """
     x = layers.Conv2D(64, 7, strides=(2, 2), padding="same", use_bias=False, name="stem_conv")(input_tensor)
     x = _bn("stem_bn")(x)
@@ -68,7 +72,7 @@ def build_cnn_backbone(input_tensor):
     x = _basic_block(x, 64, strides=(1, 1), name="layer1_block1")
     x = _basic_block(x, 64, strides=(1, 1), name="layer1_block2")
 
-    x = _basic_block(x, 128, strides=(2, 2), name="layer2_block1")
+    x = _basic_block(x, 128, strides=(2, 1), name="layer2_block1")
     x = _basic_block(x, 128, strides=(1, 1), name="layer2_block2")
 
     x = _basic_block(x, 256, strides=(2, 1), name="layer3_block1")

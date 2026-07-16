@@ -25,7 +25,7 @@ data:
 
 preprocess:
   target_height: 64
-  max_width: 1024
+  max_width: 1536                # nới trần để dòng dài đỡ bị nén (đo được 14/32 mẫu chạm 1024)
   pad_value: 255
   use_clahe: true
   clahe_clip_limit: 2.0
@@ -38,7 +38,7 @@ model:
   bilstm_units: 256
   bilstm_layers: 2
   dropout: 0.0                   # TẮT regularization để model CÓ THỂ overfit
-  width_downsample: 8            # width→time-step ratio; phải khớp stride của backbone
+  width_downsample: 4            # width→time-step ratio; phải khớp stride của backbone
 
 ctc:
   blank_index: 0
@@ -46,8 +46,9 @@ ctc:
   beam_width: 10
 
 train:
-  batch_size: 8
+  batch_size: 4                 # giảm để bù chuỗi LSTM dài gấp đôi (width_downsample 8→4) → tránh OOM
   optimizer: adam
+  grad_clipnorm: 5.0            # dập gradient spike từ dòng dài (CTC/RNN)
   checkpoint_dir: checkpoints/debug
   report_dir: reports/debug
   log_dir: runs/debug

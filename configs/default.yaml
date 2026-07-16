@@ -19,7 +19,7 @@ data:
 
 preprocess:
   target_height: 64
-  max_width: 1024
+  max_width: 1536                # nới trần để dòng dài đỡ bị nén (giữ đủ time-step cho CTC)
   pad_value: 255
   use_clahe: true
   clahe_clip_limit: 2.0
@@ -32,7 +32,7 @@ model:
   bilstm_units: 256
   bilstm_layers: 2
   dropout: 0.2
-  width_downsample: 8            # width→time-step ratio; phải khớp stride của backbone
+  width_downsample: 4            # width→time-step ratio; phải khớp stride của backbone
 
 ctc:
   blank_index: 0
@@ -42,6 +42,7 @@ ctc:
 train:
   batch_size: 16
   optimizer: adam
+  grad_clipnorm: 5.0            # dập gradient spike từ dòng dài (CTC/RNN)
   checkpoint_dir: checkpoints
   report_dir: reports
   log_dir: runs
