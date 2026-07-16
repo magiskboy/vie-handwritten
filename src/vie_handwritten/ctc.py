@@ -30,7 +30,7 @@ def ctc_loss(
 
     On macOS/Metal, the loss runs under ``/CPU:0`` because ``tf.nn.ctc_loss``
     dense path needs ``IsFinite`` / ``ReduceLogSumExp`` kernels that Metal
-    does not register. Forward CNN/BiLSTM can still run on Metal GPU.
+    does not register. Forward CNN/Transformer can still run on Metal GPU.
     """
     y_true = tf.cast(y_true, tf.int32)
     if label_length is None:

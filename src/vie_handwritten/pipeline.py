@@ -10,7 +10,7 @@ import numpy as np
 from vie_handwritten.charset import Charset
 from vie_handwritten.config import load_config
 from vie_handwritten.ctc import decode_predictions
-from vie_handwritten.model import build_crnn, load_crnn_weights
+from vie_handwritten.model import build_crnn, load_crnn_weights, pack_crnn_inputs
 from vie_handwritten.postprocess import postprocess
 from vie_handwritten.preprocess import load_image, preprocess
 from vie_handwritten.utils import project_root
@@ -48,7 +48,8 @@ class OCRPipeline:
         """Run OCR on an in-memory image array."""
         arr = preprocess(image, self.config["preprocess"])
         batch = np.expand_dims(arr, axis=0)
-        logits = self.model.predict(batch, verbose=0)
+        inputs = pack_crnn_inputs(batch)
+        logits = self.model.predict(inputs, verbose=0)
         ctc_cfg = self.config.get("ctc", {})
         texts = decode_predictions(
             logits,
@@ -69,15 +70,21 @@ class OCRPipeline:
         processed = [preprocess(img, self.config["preprocess"]) for img in images]
         max_w = max(p.shape[1] for p in processed)
         batch = []
+        lengths = []
         for p in processed:
-            if p.shape[1] < max_w:
-                h, w, c = p.shape
+            h, w, c = p.shape
+            lengths.append(max(1, w // 8))
+            if w < max_w:
                 canvas = np.zeros((h, max_w, c), dtype=np.float32)
                 canvas[:, :w] = p
                 batch.append(canvas)
             else:
                 batch.append(p)
-        logits = self.model.predict(np.stack(batch, axis=0), verbose=0)
+        inputs = pack_crnn_inputs(
+            np.stack(batch, axis=0),
+            input_length=np.asarray(lengths, dtype=np.int32),
+        )
+        logits = self.model.predict(inputs, verbose=0)
         ctc_cfg = self.config.get("ctc", {})
         texts = decode_predictions(
             logits,

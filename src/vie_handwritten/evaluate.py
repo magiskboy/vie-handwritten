@@ -10,7 +10,7 @@ from vie_handwritten.config import load_config
 from vie_handwritten.ctc import decode_predictions
 from vie_handwritten.dataset import discover_samples, train_val_test_split
 from vie_handwritten.metrics import evaluate_corpus
-from vie_handwritten.model import build_crnn, load_crnn_weights
+from vie_handwritten.model import build_crnn, load_crnn_weights, pack_crnn_inputs
 from vie_handwritten.postprocess import postprocess
 from vie_handwritten.preprocess import load_image, preprocess
 from vie_handwritten.utils import project_root
@@ -62,7 +62,8 @@ def evaluate(
     for path, text in eval_samples:
         img = load_image(str(path))
         arr = preprocess(img, config["preprocess"])
-        logits = model.predict(arr[None, ...], verbose=0)
+        inputs = pack_crnn_inputs(arr[None, ...])
+        logits = model.predict(inputs, verbose=0)
         pred = decode_predictions(
             logits,
             charset,

@@ -1,14 +1,18 @@
 [project]
 name = "vie-handwritten"
 version = "0.1.0"
-description = "Vietnamese handwritten text OCR with CRNN (CNN → BiLSTM → Linear → CTC)"
+description = "Vietnamese handwritten text OCR with CRNN (CNN → Transformer Encoder → Linear → CTC)"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    # macOS: CPU / Metal (no NVIDIA CUDA wheels)
     "tensorflow>=2.16,<2.20; sys_platform == 'darwin'",
-    "tensorflow>=2.16; sys_platform != 'darwin'",
-    "keras-hub>=0.17",
     "tensorflow-metal>=1.1.0; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    # Linux: TensorFlow with CUDA extras (pulls nvidia-cublas, etc.)
+    "tensorflow[and-cuda]>=2.19.1; sys_platform == 'linux'",
+    # Windows / other: plain TensorFlow (no CUDA extras)
+    "tensorflow>=2.16; sys_platform != 'darwin' and sys_platform != 'linux'",
+    "keras-hub>=0.17",
     "opencv-python>=4.10",
     "scikit-learn>=1.5",
     "scikit-image>=0.24",
@@ -16,7 +20,6 @@ dependencies = [
     "pyyaml>=6.0",
     "editdistance>=0.8",
     "tqdm>=4.66",
-    "tensorflow[and-cuda]>=2.19.1",
 ]
 
 [project.optional-dependencies]

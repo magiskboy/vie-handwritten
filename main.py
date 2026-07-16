@@ -19,7 +19,7 @@ configure_runtime()
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="vie-ocr",
-        description="Vietnamese handwritten OCR (ResNet-18 CRNN + CTC)",
+        description="Vietnamese handwritten OCR (ResNet-18 + Transformer + CTC)",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 

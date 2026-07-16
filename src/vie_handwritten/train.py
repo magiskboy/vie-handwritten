@@ -12,7 +12,12 @@ from tensorflow import keras
 from vie_handwritten.charset import Charset
 from vie_handwritten.config import load_config, save_config
 from vie_handwritten.dataset import build_tf_dataset, discover_samples, train_val_test_split
-from vie_handwritten.model import CTCModel, build_crnn, set_backbone_trainable
+from vie_handwritten.model import (
+    CTCModel,
+    build_crnn,
+    set_backbone_trainable,
+    set_sequence_head_trainable,
+)
 from vie_handwritten.utils import configure_runtime, ensure_dir, project_root, set_seed
 
 logger = logging.getLogger(__name__)
@@ -173,10 +178,8 @@ def train(
         phase_name = phase.get("name", f"phase_{i}")
         logger.info("=== Phase %s ===", phase_name)
         set_backbone_trainable(crnn, phase, config.get("model", {}))
-        # BiLSTM + Dense always trainable
-        for layer in crnn.layers:
-            if layer.name.startswith("bilstm") or layer.name == "logits":
-                layer.trainable = True
+        # Transformer sequence head + logits always trainable
+        set_sequence_head_trainable(crnn, trainable=True)
 
         lr = float(phase["learning_rate"])
         compile_model(ctc_model, config, learning_rate=lr)

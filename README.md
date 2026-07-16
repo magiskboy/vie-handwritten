@@ -1,9 +1,9 @@
-# Vietnamese Handwritten OCR (CRNN + CTC)
+# Vietnamese Handwritten OCR (ResNet + Transformer + CTC)
 
 Nhận dạng chữ viết tay tiếng Việt với pipeline:
 
 ```
-image → preprocess → CNN → BiLSTM → Linear → CTC
+image → preprocess → CNN → Transformer Encoder → Linear → CTC
 ```
 
 ## Stack
@@ -17,11 +17,11 @@ image → preprocess → CNN → BiLSTM → Linear → CTC
 
 ## Kiến trúc (CRNN)
 
-Tham khảo các hệ HTR tiếng Việt (Cinnamon / CRNN+CTC) và best practices HTR:
+Tham khảo best practices HTR / text-line recognition (Self-Attention + CTC):
 
-1. **Preprocess** — grayscale, CLAHE, (tuỳ chọn) adaptive threshold + morphology, giữ tỷ lệ khung hình, pad theo batch, chuẩn hoá `[0, 1]`
-2. **CNN** — trích xuất feature map theo chiều ngang (sequence)
-3. **BiLSTM** — mô hình ngữ cảnh trái↔phải trên chuỗi feature
+1. **Preprocess** — grayscale, CLAHE, (tuỳ chọn) adaptive threshold + morphology, giữ tỷ lệ khung hình, pad theo batch, chuẩn hoá ImageNet
+2. **CNN (ResNet-18)** — trích xuất feature map theo chiều ngang (sequence); ImageNet pretrained
+3. **Transformer Encoder** — self-attention trên chuỗi feature (train từ đầu; nhẹ: 4 layers / d=256)
 4. **Linear (Dense)** — logits theo từng timestep, kích thước = `|charset| + blank`
 5. **CTC** — `tf.nn.ctc_loss` khi train; greedy / beam decode khi infer
 
@@ -52,7 +52,7 @@ data/
   processed/               # dữ liệu đã chuẩn hoá (optional)
 src/vie_handwritten/
   preprocess.py   # OpenCV + scikit-image
-  model.py        # CNN → BiLSTM → Linear
+  model.py        # CNN → Transformer Encoder → Linear
   ctc.py          # loss + decode
   dataset.py      # đọc labels.json + load ảnh
   postprocess.py  # decode → chuỗi tiếng Việt
@@ -74,20 +74,10 @@ uv sync
 pip install -e ".[dev]"
 ```
 
-## Scripts (skeleton — chưa implement)
+## Scripts
 
 ```bash
-python scripts/train.py --config configs/default.yaml
-python scripts/evaluate.py --config configs/default.yaml --checkpoint checkpoints/best.keras
-python scripts/infer.py --image path/to/line.png --checkpoint checkpoints/best.keras
+python main.py train --config configs/default.yaml
+python main.py evaluate --config configs/default.yaml --checkpoint checkpoints/best.weights.h5
+python main.py infer --image path/to/line.png --checkpoint checkpoints/best.weights.h5
 ```
-
-## Trạng thái
-
-Skeleton / stubs only — các hàm raise `NotImplementedError`. Implement theo thứ tự gợi ý:
-
-1. `charset` + `preprocess`
-2. `dataset` (ảnh dòng chữ + nhãn)
-3. `model` + `ctc`
-4. `train` / `metrics`
-5. `pipeline` + `infer`

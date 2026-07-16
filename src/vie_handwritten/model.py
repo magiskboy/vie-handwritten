@@ -1,10 +1,10 @@
-"""CRNN model: ResNet-18 → BiLSTM → Linear (logits for CTC).
+"""CRNN model: ResNet-18 → Transformer Encoder → Linear (logits for CTC).
 
 Architecture:
-  Input (B, H, W, C)
+  Input (B, H, W, C) + input_length
     → ResNet-18 backbone (HTR strides, no classifier)
     → Map to sequence (B, T, D) along image width
-    → Bidirectional LSTM × N
+    → Dense → sinusoidal PE → Transformer Encoder × N
     → Dense(num_classes)  (logits; no softmax — CTC applies it)
 """
 
@@ -21,6 +21,9 @@ from tensorflow.keras import layers
 from vie_handwritten.ctc import ctc_loss as mean_ctc_loss
 
 logger = logging.getLogger(__name__)
+
+# ResNet HTR stride policy downsamples width by ~8.
+WIDTH_STRIDE = 8
 
 
 def _basic_block(
@@ -174,33 +177,144 @@ def map_to_sequence(feature_map):
     return tf.reduce_max(feature_map, axis=1)
 
 
-def build_bilstm_head(config: dict[str, Any], num_classes: int, features):
-    """Stack Bidirectional LSTM layers + Linear projection to ``num_classes``."""
+class SinusoidalPositionalEncoding(layers.Layer):
+    """Add fixed sinusoidal positional encodings to a sequence ``(B, T, D)``."""
+
+    def __init__(self, d_model: int, **kwargs):
+        super().__init__(**kwargs)
+        self.d_model = int(d_model)
+
+    def call(self, x):
+        t = tf.shape(x)[1]
+        depth = self.d_model // 2
+        positions = tf.cast(tf.range(t), tf.float32)[:, tf.newaxis]
+        depths = tf.cast(tf.range(depth), tf.float32)[tf.newaxis, :] / float(depth)
+        angle_rates = 1.0 / tf.pow(10000.0, depths)
+        angle_rads = positions * angle_rates
+        pe = tf.concat([tf.sin(angle_rads), tf.cos(angle_rads)], axis=-1)
+        if self.d_model % 2 == 1:
+            pe = tf.pad(pe, [[0, 0], [0, 1]])
+        return x + pe[tf.newaxis, :, :]
+
+    def get_config(self):
+        cfg = super().get_config()
+        cfg.update({"d_model": self.d_model})
+        return cfg
+
+
+def _transformer_encoder_block(
+    x,
+    attention_mask,
+    *,
+    d_model: int,
+    num_heads: int,
+    ffn_dim: int,
+    dropout: float,
+    name: str,
+):
+    """Pre-norm Transformer encoder block with padding mask."""
+    key_dim = max(1, d_model // num_heads)
+    y = layers.LayerNormalization(epsilon=1e-6, name=f"{name}_ln1")(x)
+    y = layers.MultiHeadAttention(
+        num_heads=num_heads,
+        key_dim=key_dim,
+        dropout=dropout,
+        name=f"{name}_mha",
+    )(y, y, attention_mask=attention_mask)
+    y = layers.Dropout(dropout, name=f"{name}_drop1")(y)
+    x = layers.Add(name=f"{name}_add1")([x, y])
+
+    y = layers.LayerNormalization(epsilon=1e-6, name=f"{name}_ln2")(x)
+    y = layers.Dense(ffn_dim, activation="gelu", name=f"{name}_ffn1")(y)
+    y = layers.Dropout(dropout, name=f"{name}_drop2")(y)
+    y = layers.Dense(d_model, name=f"{name}_ffn2")(y)
+    y = layers.Dropout(dropout, name=f"{name}_drop3")(y)
+    x = layers.Add(name=f"{name}_add2")([x, y])
+    return x
+
+
+def build_transformer_head(
+    config: dict[str, Any],
+    num_classes: int,
+    features,
+    input_length,
+):
+    """Project CNN sequence → Transformer encoder → logits for CTC."""
     model_cfg = config.get("model", config)
-    units = int(model_cfg.get("bilstm_units", 256))
-    n_layers = int(model_cfg.get("bilstm_layers", 2))
-    dropout = float(model_cfg.get("dropout", 0.2))
-    x = features
+    d_model = int(model_cfg.get("d_model", 256))
+    n_layers = int(model_cfg.get("transformer_layers", 4))
+    num_heads = int(model_cfg.get("transformer_heads", 4))
+    ffn_dim = int(model_cfg.get("transformer_ffn_dim", 4 * d_model))
+    dropout = float(model_cfg.get("dropout", 0.1))
+
+    if d_model % num_heads != 0:
+        raise ValueError(f"d_model={d_model} must be divisible by heads={num_heads}")
+
+    x = layers.Dense(d_model, name="seq_proj")(features)
+    x = SinusoidalPositionalEncoding(d_model, name="pos_encoding")(x)
+
+    # (B, 1, T): each query attends only to valid (non-pad) keys
+    def _attention_mask(args):
+        seq, lengths = args
+        t = tf.shape(seq)[1]
+        mask = tf.sequence_mask(lengths, maxlen=t)  # (B, T), True = valid
+        return mask[:, tf.newaxis, :]
+
+    attention_mask = layers.Lambda(_attention_mask, name="attention_mask")(
+        [x, input_length]
+    )
+
     for i in range(n_layers):
-        x = layers.Bidirectional(
-            layers.LSTM(units, return_sequences=True, dropout=0.0),
-            name=f"bilstm_{i + 1}",
-        )(x)
-        if dropout > 0:
-            x = layers.Dropout(dropout, name=f"bilstm_drop_{i + 1}")(x)
+        x = _transformer_encoder_block(
+            x,
+            attention_mask,
+            d_model=d_model,
+            num_heads=num_heads,
+            ffn_dim=ffn_dim,
+            dropout=dropout,
+            name=f"transformer_{i + 1}",
+        )
+
+    x = layers.LayerNormalization(epsilon=1e-6, name="transformer_out_ln")(x)
     logits = layers.Dense(num_classes, name="logits")(x)
     return logits
+
+
+def estimate_input_length(image_width, *, dtype=tf.int32):
+    """Approximate CTC/attention length from image width (HTR stride ≈ 8)."""
+    return tf.maximum(tf.cast(image_width, dtype) // WIDTH_STRIDE, 1)
+
+
+def pack_crnn_inputs(images, input_length=None):
+    """Build the dict expected by ``build_crnn`` from a batch of images.
+
+    ``images``: ``(B, H, W, C)`` numpy/tensor. If ``input_length`` is None,
+    use ``W // 8`` for every sample (no width padding).
+    """
+    images = tf.convert_to_tensor(images)
+    if input_length is None:
+        w = tf.shape(images)[2]
+        batch = tf.shape(images)[0]
+        input_length = tf.fill([batch], estimate_input_length(w))
+    else:
+        input_length = tf.convert_to_tensor(input_length, dtype=tf.int32)
+        if input_length.shape.rank == 0:
+            input_length = tf.fill([tf.shape(images)[0]], input_length)
+    return {"image": images, "input_length": input_length}
 
 
 def build_crnn(config: dict[str, Any], num_classes: int) -> keras.Model:
     """Assemble full CRNN and return a Keras ``Model`` outputting CTC logits.
 
+    Inputs: ``{"image": (B,H,W,3), "input_length": (B,)}``.
     Output shape: ``(B, T, num_classes)`` where ``num_classes`` includes blank.
     """
     model_cfg = config.get("model", {})
-    inputs = keras.Input(shape=(None, None, 3), name="image")
-    features = build_cnn_backbone(config, input_tensor=inputs)
-    backbone_model = keras.Model(inputs, features, name="resnet18_backbone")
+    image = keras.Input(shape=(None, None, 3), name="image")
+    input_length = keras.Input(shape=(), dtype="int32", name="input_length")
+
+    features = build_cnn_backbone(config, input_tensor=image)
+    backbone_model = keras.Model(image, features, name="resnet18_backbone")
 
     pretrained = model_cfg.get("pretrained", "imagenet")
     if pretrained == "imagenet":
@@ -210,8 +324,12 @@ def build_crnn(config: dict[str, Any], num_classes: int) -> keras.Model:
             logger.warning("Could not load ImageNet weights: %s", exc)
 
     seq = MapToSequence(name="map_to_sequence")(features)
-    logits = build_bilstm_head(config, num_classes, seq)
-    model = keras.Model(inputs, logits, name="crnn_resnet18")
+    logits = build_transformer_head(config, num_classes, seq, input_length)
+    model = keras.Model(
+        inputs={"image": image, "input_length": input_length},
+        outputs=logits,
+        name="crnn_resnet18_transformer",
+    )
     model.backbone = backbone_model  # type: ignore[attr-defined]
     return model
 
@@ -223,6 +341,15 @@ STAGE_PREFIXES = {
     "layer3": ("layer3_",),
     "layer4": ("layer4_",),
 }
+
+# Sequence head layers kept trainable during backbone freeze phases.
+SEQUENCE_HEAD_PREFIXES = (
+    "seq_proj",
+    "pos_encoding",
+    "attention_mask",
+    "transformer_",
+    "logits",
+)
 
 
 def set_backbone_trainable(model: keras.Model, phase_cfg: dict[str, Any], model_cfg: dict[str, Any]) -> None:
@@ -270,6 +397,13 @@ def set_backbone_trainable(model: keras.Model, phase_cfg: dict[str, Any], model_
     )
 
 
+def set_sequence_head_trainable(model: keras.Model, trainable: bool = True) -> None:
+    """Ensure Transformer sequence head layers are trainable."""
+    for layer in model.layers:
+        if any(layer.name.startswith(p) for p in SEQUENCE_HEAD_PREFIXES):
+            layer.trainable = trainable
+
+
 class CTCModel(keras.Model):
     """Wrap a logits model with CTC train/test steps."""
 
@@ -281,10 +415,8 @@ class CTCModel(keras.Model):
 
     def call(self, inputs, training=False):
         if isinstance(inputs, dict):
-            images = inputs["image"]
-        else:
-            images = inputs
-        return self.crnn(images, training=training)
+            return self.crnn(inputs, training=training)
+        return self.crnn(pack_crnn_inputs(inputs), training=training)
 
     @property
     def metrics(self):
@@ -292,16 +424,16 @@ class CTCModel(keras.Model):
 
     def train_step(self, data):
         x, y = data
-        images = x["image"]
         label_length = x["label_length"]
         input_length = x["input_length"]
         labels = y
+        crnn_inputs = {"image": x["image"], "input_length": input_length}
 
         with tf.GradientTape() as tape:
-            logits = self.crnn(images, training=True)
+            logits = self.crnn(crnn_inputs, training=True)
             time_steps = tf.shape(logits)[1]
-            input_length = tf.ones_like(input_length) * tf.cast(
-                time_steps, input_length.dtype
+            logit_length = tf.minimum(
+                tf.cast(input_length, tf.int32), time_steps
             )
             # Metal: CTC dense path forced to CPU inside mean_ctc_loss
             loss = mean_ctc_loss(
@@ -309,7 +441,7 @@ class CTCModel(keras.Model):
                 logits,
                 blank_index=self.blank_index,
                 label_length=label_length,
-                logit_length=input_length,
+                logit_length=logit_length,
             )
 
         grads = tape.gradient(loss, self.crnn.trainable_variables)
@@ -319,19 +451,19 @@ class CTCModel(keras.Model):
 
     def test_step(self, data):
         x, y = data
-        images = x["image"]
         label_length = x["label_length"]
         input_length = x["input_length"]
         labels = y
-        logits = self.crnn(images, training=False)
+        crnn_inputs = {"image": x["image"], "input_length": input_length}
+        logits = self.crnn(crnn_inputs, training=False)
         time_steps = tf.shape(logits)[1]
-        input_length = tf.ones_like(input_length) * tf.cast(time_steps, input_length.dtype)
+        logit_length = tf.minimum(tf.cast(input_length, tf.int32), time_steps)
         loss = mean_ctc_loss(
             labels,
             logits,
             blank_index=self.blank_index,
             label_length=label_length,
-            logit_length=input_length,
+            logit_length=logit_length,
         )
         self.loss_tracker.update_state(loss)
         return {"loss": self.loss_tracker.result()}
