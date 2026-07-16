@@ -1,0 +1,43 @@
+# Python-generated files
+__pycache__/
+*.py[oc]
+*.so
+build/
+dist/
+wheels/
+*.egg-info
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+*.swp
+
+# Data & artifacts (keep folder structure via .gitkeep)
+data/raw/*
+!data/raw/.gitkeep
+data/processed/*
+!data/processed/.gitkeep
+# Large image corpus — keep labels.json trackable if desired
+data/vn_handwritten_images/data/
+data/vn_handwritten_images/.DS_Store
+checkpoints/*
+!checkpoints/.gitkeep
+runs/
+logs/
+*.h5
+*.keras
+*.pb
+*.onnx
+*.tflite
+
+# SpecStory / local agent
+.specstory/

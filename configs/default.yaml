@@ -1,0 +1,70 @@
+# Default config for Vietnamese handwritten OCR (ResNet-18 CRNN + CTC)
+# image → preprocess → ResNet18 → BiLSTM → Linear → CTC
+
+project:
+  name: vie-handwritten
+  seed: 42
+
+data:
+  # data/vn_handwritten_images/
+  #   labels.json          # {"1.jpg": "Số 3 ...", "0001_samples.png": "...", ...}
+  #   data/<filename>      # ảnh dòng chữ (png/jpg/jpeg)
+  dataset_dir: data/vn_handwritten_images
+  images_subdir: data
+  labels_file: labels.json
+  processed_dir: data/processed
+  charset_path: data/charset/vietnamese.txt
+  train_split: 0.8
+  val_split: 0.1
+  test_split: 0.1
+
+preprocess:
+  target_height: 64
+  # Keep aspect ratio; pad width to batch max (best practice for HTR)
+  max_width: 1024
+  pad_value: 255
+  use_clahe: true
+  clahe_clip_limit: 2.0
+  clahe_tile_grid: [8, 8]
+  use_adaptive_threshold: false
+  normalize: imagenet  # ImageNet mean/std (or true for [0,1])
+  channels: 3
+
+model:
+  backbone: resnet18
+  pretrained: imagenet
+  # Phase A freezes all; Phase B keeps stem/layer1/layer2 frozen
+  freeze_stages: [stem, layer1, layer2]
+  stride_policy: htr  # stage3 (2,1), stage4 (1,1) — preserve width for CTC
+  bilstm_units: 256
+  bilstm_layers: 2
+  dropout: 0.2
+
+ctc:
+  blank_index: 0  # matches tf.nn.ctc_loss default unless overridden
+  decode: greedy  # greedy | beam
+  beam_width: 10
+
+train:
+  batch_size: 16
+  optimizer: adam
+  early_stopping_patience: 10
+  reduce_lr_patience: 5
+  reduce_lr_factor: 0.5
+  checkpoint_dir: checkpoints
+  log_dir: runs
+  curriculum_short_bias_epochs: 5
+  mixed_precision: false
+  phases:
+    - name: a_head
+      epochs: 40
+      learning_rate: 0.001
+      freeze_backbone: true
+    - name: b_finetune
+      epochs: 60
+      learning_rate: 0.0001
+      freeze_backbone: false
+      unfreeze_from: layer3
+
+eval:
+  metrics: [cer, wer]  # Character / Word Error Rate
