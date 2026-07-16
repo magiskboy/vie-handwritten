@@ -135,10 +135,18 @@ def _oov_chars(text: str, vocab: set[str]) -> set[str]:
     return {ch for ch in text if ch not in vocab}
 
 
-def build_manifests(config: dict[str, Any]) -> dict[str, Path]:
-    """Scan datasets, split by writer, filter OOV, and write JSONL manifests.
+def build_manifests(config: dict[str, Any]) -> dict[str, dict[str, Path]]:
+    """Scan datasets, split by writer, filter OOV, write **per-source** manifests.
 
-    Returns ``{"train": path, "val": path, "test": path}``.
+    Each source (``word``, ``line``, …) gets its own frozen train/val/test split
+    under ``<manifest_dir>/<source>/{train,val,test}.jsonl``. Multi-phase training
+    then pins each phase to one source's manifests (word phase → line phase).
+
+    The writer-independent validation split holds out the *same* writer ids across
+    all sources (writer-id is consistent between HWDB_word / HWDB_line), so no
+    writer leaks between train and val in any phase.
+
+    Returns ``{source: {"train": path, "val": path, "test": path}}``.
     """
     from vie_handwritten.charset import Charset
 
@@ -146,7 +154,7 @@ def build_manifests(config: dict[str, Any]) -> dict[str, Path]:
     root_dir = _abs_path(data_cfg["root_dir"])
     manifest_dir = _abs_path(data_cfg.get("manifest_dir", "data/manifests"))
     manifest_dir.mkdir(parents=True, exist_ok=True)
-    sources = list(data_cfg.get("sources", ["line", "word"]))
+    sources = list(data_cfg.get("sources", ["word", "line"]))
     train_subdir = data_cfg.get("train_subdir", "train_data")
     test_subdir = data_cfg.get("test_subdir", "test_data")
     val_ratio = float(data_cfg.get("val_writers_ratio", 0.1))
@@ -174,50 +182,57 @@ def build_manifests(config: dict[str, Any]) -> dict[str, Path]:
         len(all_writers) - len(val_writers),
     )
 
-    dropped = 0
-    stats: dict[str, dict[str, int]] = {"train": {}, "val": {}, "test": {}}
-    buckets: dict[str, list[dict[str, str]]] = {"train": [], "val": [], "test": []}
+    result: dict[str, dict[str, Path]] = {}
+    for source in sources:
+        dropped = 0
+        buckets: dict[str, list[dict[str, str]]] = {"train": [], "val": [], "test": []}
 
-    def _accept(rec: dict[str, str], split: str) -> None:
-        nonlocal dropped
-        text = _normalize_text(rec["text"])
-        if drop_oov and _oov_chars(text, vocab):
-            dropped += 1
-            return
-        rec = {**rec, "text": text, "split": split}
-        buckets[split].append(rec)
-        stats[split][rec["source"]] = stats[split].get(rec["source"], 0) + 1
+        def _accept(rec: dict[str, str], split: str) -> None:
+            nonlocal dropped
+            text = _normalize_text(rec["text"])
+            if drop_oov and _oov_chars(text, vocab):
+                dropped += 1
+                return
+            buckets[split].append({**rec, "text": text, "split": split})
 
-    for s in sources:
-        for r in train_records[s]:
+        for r in train_records[source]:
             _accept(r, "val" if r["writer"] in val_writers else "train")
-        for r in test_records[s]:
+        for r in test_records[source]:
             _accept(r, "test")
 
-    paths: dict[str, Path] = {}
-    for split, recs in buckets.items():
-        out = manifest_dir / f"{split}.jsonl"
-        with out.open("w", encoding="utf-8") as fh:
-            for rec in recs:
-                fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
-        paths[split] = out
+        out_dir = manifest_dir / source
+        out_dir.mkdir(parents=True, exist_ok=True)
+        paths: dict[str, Path] = {}
+        for split, recs in buckets.items():
+            out = out_dir / f"{split}.jsonl"
+            with out.open("w", encoding="utf-8") as fh:
+                for rec in recs:
+                    fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            paths[split] = out
 
-    summary = {
-        "root_dir": str(root_dir),
-        "sources": sources,
-        "seed": seed,
-        "val_writers_ratio": val_ratio,
-        "drop_oov": drop_oov,
-        "dropped_oov": dropped,
-        "counts": {k: {"total": len(v), **stats[k]} for k, v in buckets.items()},
-        "val_writers": sorted(val_writers),
-    }
-    (manifest_dir / "summary.json").write_text(
-        json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
-    logger.info("Manifests written to %s | counts=%s dropped_oov=%d",
-                manifest_dir, {k: len(v) for k, v in buckets.items()}, dropped)
-    return paths
+        summary = {
+            "root_dir": str(root_dir),
+            "source": source,
+            "seed": seed,
+            "val_writers_ratio": val_ratio,
+            "drop_oov": drop_oov,
+            "dropped_oov": dropped,
+            "counts": {k: len(v) for k, v in buckets.items()},
+            "val_writers": sorted(val_writers),
+        }
+        (out_dir / "summary.json").write_text(
+            json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        logger.info(
+            "[%s] manifests → %s | counts=%s dropped_oov=%d",
+            source,
+            out_dir,
+            {k: len(v) for k, v in buckets.items()},
+            dropped,
+        )
+        result[source] = paths
+
+    return result
 
 
 def load_manifest(path: str | Path) -> list[dict[str, str]]:
@@ -232,17 +247,29 @@ def load_manifest(path: str | Path) -> list[dict[str, str]]:
     return records
 
 
-def manifest_paths(config: dict[str, Any]) -> dict[str, Path]:
-    """Return expected manifest paths (does not build them)."""
+def source_manifest_paths(config: dict[str, Any], source: str) -> dict[str, Path]:
+    """Return expected manifest paths for one source (does not build them)."""
     manifest_dir = _abs_path(config["data"].get("manifest_dir", "data/manifests"))
-    return {s: manifest_dir / f"{s}.jsonl" for s in ("train", "val", "test")}
+    base = manifest_dir / source
+    return {s: base / f"{s}.jsonl" for s in ("train", "val", "test")}
 
 
-def ensure_manifests(config: dict[str, Any], *, rebuild: bool = False) -> dict[str, Path]:
-    """Build manifests if missing (or ``rebuild``), then return their paths."""
-    paths = manifest_paths(config)
+def ensure_source_manifests(
+    config: dict[str, Any], source: str, *, rebuild: bool = False
+) -> dict[str, Path]:
+    """Build all manifests if the requested source is missing (or ``rebuild``).
+
+    Manifests are built for every source in ``data.sources`` in one pass so the
+    writer-independent split stays consistent across sources.
+    """
+    paths = source_manifest_paths(config, source)
     if rebuild or not all(p.is_file() for p in paths.values()):
-        return build_manifests(config)
+        built = build_manifests(config)
+        if source not in built:
+            raise ValueError(
+                f"Source {source!r} not in data.sources={config['data'].get('sources')}"
+            )
+        return built[source]
     return paths
 
 

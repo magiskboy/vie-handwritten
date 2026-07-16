@@ -8,7 +8,11 @@ from pathlib import Path
 from vie_handwritten.charset import Charset
 from vie_handwritten.config import load_config
 from vie_handwritten.ctc import decode_predictions
-from vie_handwritten.dataset import ensure_manifests, load_manifest, resolve_image_path
+from vie_handwritten.dataset import (
+    ensure_source_manifests,
+    load_manifest,
+    resolve_image_path,
+)
 from vie_handwritten.metrics import evaluate_corpus
 from vie_handwritten.model import build_crnn, load_crnn_weights
 from vie_handwritten.postprocess import postprocess
@@ -37,14 +41,17 @@ def evaluate(
         charset_path = project_root() / charset_path
 
     charset = Charset.from_file(charset_path)
-    manifests = ensure_manifests(config)
+    source = source or config["data"].get("eval_source")
+    if not source:
+        raise ValueError(
+            "evaluate needs a source (pass --source or set data.eval_source): "
+            "manifests are now per-source"
+        )
+    manifests = ensure_source_manifests(config, source)
     if split not in manifests:
         raise ValueError(f"Unknown split={split}")
     records = load_manifest(manifests[split])
 
-    source = source or config["data"].get("eval_source")
-    if source:
-        records = [r for r in records if r["source"] == source]
     if max_samples is not None and len(records) > max_samples:
         import random
 

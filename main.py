@@ -34,7 +34,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Override data.sources (e.g. --sources line to drop word)",
     )
 
-    train_p = sub.add_parser("train", help="Train CRNN model")
+    train_p = sub.add_parser("train", help="Train CRNN model (word→line curriculum)")
     train_p.add_argument("--config", default="configs/default.yaml")
     train_p.add_argument("--resume", default=None, help="Checkpoint weights to resume from")
     train_p.add_argument(
@@ -47,6 +47,11 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help="Limit dataset to N random samples (smoke / small-set training)",
+    )
+    train_p.add_argument(
+        "--phase",
+        default=None,
+        help="Run only one phase by name (e.g. word or line); its init_from weights must exist",
     )
 
     eval_p = sub.add_parser("evaluate", help="Evaluate checkpoint (CER/WER)")
@@ -83,13 +88,15 @@ def main(argv: list[str] | None = None) -> None:
         config = load_config(args.config)
         if args.sources:
             config["data"]["sources"] = args.sources
-        paths = build_manifests(config)
-        summary_file = paths["train"].parent / "summary.json"
-        if summary_file.is_file():
-            summary = json.loads(summary_file.read_text(encoding="utf-8"))
-            print(json.dumps(summary["counts"], ensure_ascii=False, indent=2))
-        for split, path in paths.items():
-            print(f"{split}: {path}")
+        per_source = build_manifests(config)
+        for source, paths in per_source.items():
+            summary_file = paths["train"].parent / "summary.json"
+            counts = {}
+            if summary_file.is_file():
+                counts = json.loads(summary_file.read_text(encoding="utf-8")).get("counts", {})
+            print(f"[{source}] {json.dumps(counts, ensure_ascii=False)}")
+            for split, path in paths.items():
+                print(f"  {split}: {path}")
     elif args.command == "train":
         from vie_handwritten.train import train
 
@@ -98,6 +105,7 @@ def main(argv: list[str] | None = None) -> None:
             resume_from=args.resume,
             max_samples=args.max_samples,
             rebuild_data=args.rebuild_data,
+            only_phase=args.phase,
         )
     elif args.command == "evaluate":
         from vie_handwritten.evaluate import evaluate

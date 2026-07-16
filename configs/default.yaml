@@ -13,18 +13,19 @@ data:
   # paragraph (ảnh nguyên trang) hiện KHÔNG dùng để train.
   root_dir: data/images
   manifest_dir: data/manifests
-  sources: [line]                # chỉ dùng line (bỏ word). Thêm 'word' để bật lại.
-  val_sources: [line]            # val theo mục tiêu triển khai (đọc dòng)
-  eval_source: line              # evaluate mặc định trên line
+  # build-data sinh manifest RIÊNG cho từng source, cố định cho mọi lần train:
+  #   data/manifests/word/{train,val,test}.jsonl
+  #   data/manifests/line/{train,val,test}.jsonl
+  # Mỗi phase training (train.phases) pin vào manifest của đúng 1 source.
+  sources: [word, line]          # thứ tự curriculum: word trước, line sau
+  eval_source: line              # evaluate mặc định trên line (mục tiêu triển khai)
   train_subdir: train_data
   test_subdir: test_data
-  val_writers_ratio: 0.1         # tách ~10% writers từ train_data làm val
+  val_writers_ratio: 0.1         # tách ~10% writers từ train_data làm val (chung id giữa các source)
   max_val_samples: 2000          # giới hạn số mẫu val cho nhanh
   drop_oov: true                 # bỏ mẫu chứa ký tự ngoài charset
   charset_path: data/charset/vietnamese.txt
   processed_dir: data/processed
-  # Trọng số trộn nguồn mặc định (có thể override theo từng pha ở train.phases)
-  source_weights: {line: 1.0}
 
 preprocess:
   target_height: 64
@@ -56,28 +57,36 @@ ctc:
 train:
   batch_size: 16
   optimizer: adam
-  # Dataset trộn nguồn lặp vô hạn → cần steps_per_epoch cho mỗi epoch.
+  # Dataset lặp vô hạn (shuffle+repeat) → cần steps_per_epoch cho mỗi epoch.
   steps_per_epoch: 500
   early_stopping_patience: 10
   reduce_lr_patience: 5
   reduce_lr_factor: 0.5
   checkpoint_dir: checkpoints
+  report_dir: reports
   log_dir: runs
   mixed_precision: false
+  # Two-phase CURRICULUM (word → line), theo Louradour & Kermorvant 2013:
+  # học chuỗi ngắn (word) trước để CTC định vị ký tự tốt, rồi transfer sang line.
+  # Vì word/line chung charset → toàn bộ weights (kể cả lớp logits) transfer 100%.
+  # Mỗi phase có 2 stage freeze→unfreeze (train head trước, mở băng finetune sau).
   phases:
-    # Pha A — warmup/head: đóng băng backbone (ImageNet), chỉ train BiLSTM+Dense.
-    - name: a_warmup
-      epochs: 15
-      learning_rate: 0.001
-      freeze_backbone: true
-      source_weights: {line: 1.0}
-    # Pha B — finetune: mở băng từ layer3 (giữ stem/layer1/layer2), LR nhỏ.
-    - name: b_finetune
-      epochs: 40
-      learning_rate: 0.0001
-      freeze_backbone: false
-      unfreeze_from: layer3
-      source_weights: {line: 1.0}
+    # ---- Phase 1: WORD (init từ backbone ImageNet, head random) ----
+    - name: word
+      source: word
+      init_from: imagenet
+      stages:
+        - {name: warmup,   epochs: 8,  learning_rate: 0.001,   freeze_backbone: true}
+        - {name: finetune, epochs: 30, learning_rate: 0.0001,  freeze_backbone: false, unfreeze_from: layer3}
+    # ---- Phase 2: LINE (init từ best weights của phase word) ----
+    # LR nhỏ hơn + mở băng sâu hơn (layer2): finetune gần toàn mạng cho tốt nhất
+    # (Boosting HTR w/ Transfer Learning, arXiv:1804.01527).
+    - name: line
+      source: line
+      init_from: word
+      stages:
+        - {name: warmup,   epochs: 4,  learning_rate: 0.0005,  freeze_backbone: true}
+        - {name: finetune, epochs: 40, learning_rate: 0.00005, freeze_backbone: false, unfreeze_from: layer2}
 
 eval:
   metrics: [cer, wer]  # Character / Word Error Rate

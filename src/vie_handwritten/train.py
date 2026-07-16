@@ -1,7 +1,8 @@
-"""Training loop helpers (Keras fit with 2-phase freeze/unfreeze)."""
+"""Training loop: word→line curriculum, each phase with freeze→unfreeze stages."""
 
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 from typing import Any
@@ -14,11 +15,12 @@ from vie_handwritten.config import load_config, save_config
 from vie_handwritten.dataset import (
     build_eval_dataset,
     build_training_dataset,
-    ensure_manifests,
+    ensure_source_manifests,
     group_by_source,
     load_manifest,
+    resolve_image_path,
 )
-from vie_handwritten.model import CTCModel, build_crnn, set_backbone_trainable
+from vie_handwritten.model import CTCModel, build_crnn, load_crnn_weights, set_backbone_trainable
 from vie_handwritten.utils import configure_runtime, ensure_dir, project_root, set_seed
 
 logger = logging.getLogger(__name__)
@@ -31,12 +33,16 @@ def build_callbacks(
     phase_name: str,
     crnn: keras.Model,
     best_tracker: dict[str, float],
+    best_path: Path,
 ) -> list:
-    """EarlyStopping, ReduceLROnPlateau, TensorBoard, and CRNN weight checkpoint."""
+    """EarlyStopping, ReduceLROnPlateau, TensorBoard, and CRNN weight checkpoint.
+
+    ``best_path`` receives the lowest-``val_loss`` weights across the whole phase
+    (shared via ``best_tracker`` between the phase's stages).
+    """
     train_cfg = config["train"]
     log_dir = ensure_dir(project_root() / train_cfg.get("log_dir", "runs") / phase_name)
     weights_path = checkpoint_path.with_suffix(".weights.h5")
-    best_path = checkpoint_path.parent / "best.weights.h5"
 
     class SaveCRNNWeights(keras.callbacks.Callback):
         def __init__(
@@ -108,14 +114,185 @@ def _resolve_charset_path(config: dict[str, Any]) -> Path:
     return charset_path
 
 
+def _report_split(
+    crnn: keras.Model,
+    config: dict[str, Any],
+    records: list[dict[str, str]],
+    charset: Charset,
+) -> dict[str, float]:
+    """Greedy/beam decode ``records`` with the in-memory CRNN → CER/WER metrics."""
+    from vie_handwritten.ctc import decode_predictions
+    from vie_handwritten.metrics import evaluate_corpus
+    from vie_handwritten.postprocess import postprocess
+    from vie_handwritten.preprocess import load_image, preprocess
+
+    ctc_cfg = config.get("ctc", {})
+    refs: list[str] = []
+    hyps: list[str] = []
+    for rec in records:
+        arr = preprocess(load_image(str(resolve_image_path(config, rec))), config["preprocess"])
+        logits = crnn.predict(arr[None, ...], verbose=0)
+        pred = decode_predictions(
+            logits,
+            charset,
+            method=ctc_cfg.get("decode", "greedy"),
+            blank_index=int(ctc_cfg.get("blank_index", 0)),
+            beam_width=int(ctc_cfg.get("beam_width", 10)),
+        )[0]
+        refs.append(rec["text"])
+        hyps.append(postprocess(pred))
+    return evaluate_corpus(refs, hyps)
+
+
+def _run_phase(
+    phase: dict[str, Any],
+    *,
+    config: dict[str, Any],
+    crnn: keras.Model,
+    ctc_model: CTCModel,
+    charset: Charset,
+    ckpt_root: Path,
+    report_dir: Path,
+    seed: int,
+    max_samples: int | None,
+    rebuild_data: bool,
+) -> dict[str, Any]:
+    """Train one dataset phase (all its freeze→unfreeze stages) + write a report."""
+    phase_name = phase["name"]
+    source = phase["source"]
+    steps_per_epoch = int(config["train"].get("steps_per_epoch", 500))
+    logger.info("################ PHASE %s (source=%s) ################", phase_name, source)
+
+    # --- Transfer init: reload best weights of a previous phase if requested. ---
+    init_from = phase.get("init_from")
+    if init_from and init_from != "imagenet":
+        src_weights = ckpt_root / f"{init_from}.best.weights.h5"
+        if not src_weights.is_file():
+            raise FileNotFoundError(
+                f"Phase {phase_name!r} needs weights from phase {init_from!r} at "
+                f"{src_weights} — run that phase first."
+            )
+        logger.info("Transfer init: loading %s", src_weights)
+        load_crnn_weights(crnn, src_weights)
+
+    # --- Data (this phase pins to one source's frozen manifests). ---
+    manifests = ensure_source_manifests(config, source, rebuild=rebuild_data)
+    train_records = load_manifest(manifests["train"])
+    val_records = load_manifest(manifests["val"])
+    if max_samples is not None:
+        rng = __import__("random").Random(seed)
+        rng.shuffle(train_records)
+        train_records = train_records[:max_samples]
+        logger.info("Using subset of %d train samples (--max-samples)", len(train_records))
+    train_by_source = group_by_source(train_records)
+    logger.info("[%s] train=%d val=%d", source, len(train_records), len(val_records))
+
+    val_ds = build_eval_dataset(
+        val_records,
+        charset=charset,
+        config=config,
+        max_samples=config["data"].get("max_val_samples"),
+        seed=seed,
+    )
+
+    phase_best_tracker = {"val_loss": float("inf")}
+    phase_best_path = ckpt_root / f"{phase_name}.best.weights.h5"
+    history_all: dict[str, Any] = {}
+
+    for stage in phase["stages"]:
+        stage_name = stage.get("name", "stage")
+        logger.info("=== %s / stage %s ===", phase_name, stage_name)
+        set_backbone_trainable(crnn, stage, config.get("model", {}))
+        # BiLSTM + Dense head always trainable.
+        for layer in crnn.layers:
+            if layer.name.startswith("bilstm") or layer.name == "logits":
+                layer.trainable = True
+        # Recompile after any trainable change (required by Keras).
+        compile_model(ctc_model, config, learning_rate=float(stage["learning_rate"]))
+        logger.info(
+            "Trainable parameters: %s",
+            f"{sum(int(tf.size(w)) for w in crnn.trainable_weights):,}",
+        )
+
+        train_ds = build_training_dataset(
+            train_by_source,
+            weights={source: 1.0},
+            charset=charset,
+            config=config,
+            seed=seed,
+        )
+        stage_ckpt = ckpt_root / f"{phase_name}_{stage_name}.keras"
+        callbacks = build_callbacks(
+            config,
+            checkpoint_path=stage_ckpt,
+            phase_name=f"{phase_name}/{stage_name}",
+            crnn=crnn,
+            best_tracker=phase_best_tracker,
+            best_path=phase_best_path,
+        )
+        history = ctc_model.fit(
+            train_ds,
+            validation_data=val_ds,
+            epochs=int(stage["epochs"]),
+            steps_per_epoch=steps_per_epoch,
+            callbacks=callbacks,
+            shuffle=False,  # tf.data already shuffled
+            verbose=1,
+        )
+        history_all[stage_name] = history.history
+
+    # Restore this phase's best weights before reporting / handing to next phase.
+    if phase_best_path.is_file():
+        load_crnn_weights(crnn, phase_best_path)
+        logger.info("Restored phase best (val_loss=%.4f)", phase_best_tracker["val_loss"])
+
+    # --- Report on this source's val + test splits. ---
+    # Val can be huge (word ~12k) → cap it with max_val_samples; test is full.
+    logger.info("[%s] evaluating val/test for report …", phase_name)
+    report_val_records = val_records
+    max_val = config["data"].get("max_val_samples")
+    if max_val is not None and len(report_val_records) > int(max_val):
+        report_val_records = __import__("random").Random(seed).sample(
+            report_val_records, int(max_val)
+        )
+    val_metrics = _report_split(crnn, config, report_val_records, charset)
+    test_metrics = _report_split(crnn, config, load_manifest(manifests["test"]), charset)
+    report = {
+        "phase": phase_name,
+        "source": source,
+        "init_from": init_from,
+        "best_val_loss": phase_best_tracker["val_loss"],
+        "val": val_metrics,
+        "test": test_metrics,
+        "weights": str(phase_best_path),
+    }
+    report_path = report_dir / f"{phase_name}.json"
+    report_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
+    logger.info(
+        "[%s] REPORT test CER=%.4f WER=%.4f (n=%d) → %s",
+        phase_name,
+        test_metrics["cer"],
+        test_metrics["wer"],
+        test_metrics["n"],
+        report_path,
+    )
+    return report
+
+
 def train(
     config_path: str | Path,
     *,
     resume_from: str | Path | None = None,
     max_samples: int | None = None,
     rebuild_data: bool = False,
+    only_phase: str | None = None,
 ) -> Any:
-    """Full training entry: load data → build CRNN → 2-phase fit → save checkpoint."""
+    """Curriculum training: run each dataset phase (word→line) end-to-end.
+
+    Each phase trains its freeze→unfreeze stages, restores its best weights, then
+    reports CER/WER on that source's val + test splits. ``only_phase`` restricts
+    the run to a single phase (its ``init_from`` weights must already exist).
+    """
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     runtime = configure_runtime()
     logger.info("Runtime: %s", runtime)
@@ -131,135 +308,60 @@ def train(
     charset = Charset.from_file(_resolve_charset_path(config))
     logger.info("Charset classes: %d", charset.num_classes)
 
-    manifests = ensure_manifests(config, rebuild=rebuild_data)
-    train_records = load_manifest(manifests["train"])
-    val_records = load_manifest(manifests["val"])
-    if max_samples is not None:
-        rng = __import__("random").Random(seed)
-        rng.shuffle(train_records)
-        train_records = train_records[:max_samples]
-        logger.info("Using subset of %d train samples (--max-samples)", len(train_records))
-
-    train_by_source = group_by_source(train_records)
-    logger.info(
-        "Train records by source: %s (val=%d)",
-        {s: len(r) for s, r in train_by_source.items()},
-        len(val_records),
-    )
-
-    # Validation reflects the deployment objective (line recognition by default).
-    val_sources = set(config["data"].get("val_sources", ["line"]))
-    val_eval_records = [r for r in val_records if r["source"] in val_sources] or val_records
-    val_ds = build_eval_dataset(
-        val_eval_records,
-        charset=charset,
-        config=config,
-        max_samples=config["data"].get("max_val_samples"),
-        seed=seed,
-    )
-
-    default_weights = dict(config["data"].get("source_weights", {}))
-    steps_per_epoch = int(config["train"].get("steps_per_epoch", 500))
-
     ckpt_root = ensure_dir(project_root() / config["train"].get("checkpoint_dir", "checkpoints"))
+    report_dir = ensure_dir(project_root() / config["train"].get("report_dir", "reports"))
     save_config(config, ckpt_root / "config_used.yaml")
 
     crnn = build_crnn(config, num_classes=charset.num_classes)
     if resume_from is not None:
         logger.info("Loading weights from %s", resume_from)
-        from vie_handwritten.model import load_crnn_weights
-
         load_crnn_weights(crnn, resume_from)
 
     blank_index = int(config.get("ctc", {}).get("blank_index", charset.blank_index))
     ctc_model = CTCModel(crnn, blank_index=blank_index, name="ctc_crnn")
 
-    phases = config["train"].get("phases") or [
-        {
-            "name": "a_warmup",
-            "epochs": 15,
-            "learning_rate": 1e-3,
-            "freeze_backbone": True,
-            "source_weights": {"word": 0.7, "line": 0.3},
-        },
-        {
-            "name": "b_finetune",
-            "epochs": 40,
-            "learning_rate": 1e-4,
-            "freeze_backbone": False,
-            "unfreeze_from": "layer3",
-            "source_weights": {"line": 0.85, "word": 0.15},
-        },
-    ]
+    phases = list(config["train"].get("phases") or [])
+    if not phases:
+        raise ValueError("config train.phases is empty")
+    if only_phase is not None:
+        phases = [p for p in phases if p.get("name") == only_phase]
+        if not phases:
+            raise ValueError(f"--phase {only_phase!r} not found in config train.phases")
 
-    history_all = {}
-    # Tracks the lowest val_loss across all phases so best.weights.h5 is truly
-    # the best checkpoint of the whole run.
-    best_tracker = {"val_loss": float("inf")}
-
-    for i, phase in enumerate(phases):
-        phase_name = phase.get("name", f"phase_{i}")
-        logger.info("=== Phase %s ===", phase_name)
-        set_backbone_trainable(crnn, phase, config.get("model", {}))
-        # BiLSTM + Dense always trainable
-        for layer in crnn.layers:
-            if layer.name.startswith("bilstm") or layer.name == "logits":
-                layer.trainable = True
-
-        lr = float(phase["learning_rate"])
-        compile_model(ctc_model, config, learning_rate=lr)
-
-        trainable = sum(int(tf.size(w)) for w in crnn.trainable_weights)
-        logger.info("Trainable parameters: %s", f"{trainable:,}")
-
-        # Per-phase source mixing (fall back to global data.source_weights, else
-        # equal weight over the sources actually present in the manifest).
-        weights = dict(phase.get("source_weights", default_weights))
-        if not weights:
-            weights = {s: 1.0 for s in train_by_source}
-        train_ds = build_training_dataset(
-            train_by_source,
-            weights=weights,
-            charset=charset,
-            config=config,
-            seed=seed,
+    reports: list[dict[str, Any]] = []
+    for phase in phases:
+        reports.append(
+            _run_phase(
+                phase,
+                config=config,
+                crnn=crnn,
+                ctc_model=ctc_model,
+                charset=charset,
+                ckpt_root=ckpt_root,
+                report_dir=report_dir,
+                seed=seed,
+                max_samples=max_samples,
+                rebuild_data=rebuild_data,
+            )
         )
 
-        phase_ckpt = ckpt_root / f"{phase_name}.keras"
-        callbacks = build_callbacks(
-            config,
-            checkpoint_path=phase_ckpt,
-            phase_name=phase_name,
-            crnn=crnn,
-            best_tracker=best_tracker,
-        )
+    # The last phase (line) is the deployment model → expose as best.weights.h5.
+    final = reports[-1]
+    final_best = ckpt_root / f"{final['phase']}.best.weights.h5"
+    if final_best.is_file():
+        import shutil
 
-        history = ctc_model.fit(
-            train_ds,
-            validation_data=val_ds,
-            epochs=int(phase["epochs"]),
-            steps_per_epoch=steps_per_epoch,
-            callbacks=callbacks,
-            shuffle=False,  # tf.data already shuffled + mixed
-            verbose=1,
-        )
-        history_all[phase_name] = history.history
+        shutil.copyfile(final_best, ckpt_root / "best.weights.h5")
 
-        # Save the last-epoch weights to a separate file for resuming/debugging.
-        # Do NOT overwrite best.weights.h5 here: with restore_best_weights=False
-        # the in-memory model holds the last epoch (not the best), so overwriting
-        # would clobber the best checkpoint saved by the callback.
-        last_weights_path = phase_ckpt.with_suffix(".last.weights.h5")
-        crnn.save_weights(str(last_weights_path))
+    logger.info("==================== CURRICULUM SUMMARY ====================")
+    for r in reports:
         logger.info(
-            "Saved phase last-epoch weights: %s (best so far val_loss=%.4f)",
-            last_weights_path,
-            best_tracker["val_loss"],
+            "phase=%-6s source=%-5s test CER=%.4f WER=%.4f (n=%d)",
+            r["phase"],
+            r["source"],
+            r["test"]["cer"],
+            r["test"]["wer"],
+            r["test"]["n"],
         )
-
-    logger.info(
-        "Training complete. Best weights: %s | test manifest: %s",
-        ckpt_root / "best.weights.h5",
-        manifests["test"],
-    )
+    logger.info("Deployment weights: %s", ckpt_root / "best.weights.h5")
     return ctc_model
