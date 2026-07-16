@@ -24,33 +24,46 @@ def build_callbacks(
     checkpoint_path: Path,
     phase_name: str,
     crnn: keras.Model,
+    best_tracker: dict[str, float],
 ) -> list:
     """EarlyStopping, ReduceLROnPlateau, TensorBoard, and CRNN weight checkpoint."""
     train_cfg = config["train"]
     log_dir = ensure_dir(project_root() / train_cfg.get("log_dir", "runs") / phase_name)
     weights_path = checkpoint_path.with_suffix(".weights.h5")
+    best_path = checkpoint_path.parent / "best.weights.h5"
 
     class SaveCRNNWeights(keras.callbacks.Callback):
-        def __init__(self, model_to_save: keras.Model, path: Path):
+        def __init__(
+            self,
+            model_to_save: keras.Model,
+            path: Path,
+            best_path: Path,
+            best_tracker: dict[str, float],
+        ):
             super().__init__()
             self.model_to_save = model_to_save
             self.path = path
-            self.best = float("inf")
+            self.best_path = best_path
+            # Shared across phases so best.weights.h5 tracks the global best.
+            self.best_tracker = best_tracker
+            # Per-phase best for the phase-specific checkpoint file.
+            self.phase_best = float("inf")
 
         def on_epoch_end(self, epoch, logs=None):
             logs = logs or {}
             val_loss = logs.get("val_loss")
             if val_loss is None:
                 return
-            if val_loss < self.best:
-                self.best = float(val_loss)
+            val_loss = float(val_loss)
+            if val_loss < self.phase_best:
+                self.phase_best = val_loss
                 self.model_to_save.save_weights(str(self.path))
-                self.model_to_save.save_weights(
-                    str(self.path.parent / "best.weights.h5")
-                )
+            if val_loss < self.best_tracker["val_loss"]:
+                self.best_tracker["val_loss"] = val_loss
+                self.model_to_save.save_weights(str(self.best_path))
 
     callbacks = [
-        SaveCRNNWeights(crnn, weights_path),
+        SaveCRNNWeights(crnn, weights_path, best_path, best_tracker),
         keras.callbacks.EarlyStopping(
             monitor="val_loss",
             patience=int(train_cfg.get("early_stopping_patience", 10)),
@@ -168,6 +181,9 @@ def train(
     ]
 
     history_all = {}
+    # Tracks the lowest val_loss across all phases so best.weights.h5 is truly
+    # the best checkpoint of the whole run.
+    best_tracker = {"val_loss": float("inf")}
 
     for i, phase in enumerate(phases):
         phase_name = phase.get("name", f"phase_{i}")
@@ -186,7 +202,11 @@ def train(
 
         phase_ckpt = ckpt_root / f"{phase_name}.keras"
         callbacks = build_callbacks(
-            config, checkpoint_path=phase_ckpt, phase_name=phase_name, crnn=crnn
+            config,
+            checkpoint_path=phase_ckpt,
+            phase_name=phase_name,
+            crnn=crnn,
+            best_tracker=best_tracker,
         )
 
         history = ctc_model.fit(
@@ -199,10 +219,17 @@ def train(
         )
         history_all[phase_name] = history.history
 
-        weights_path = phase_ckpt.with_suffix(".weights.h5")
-        crnn.save_weights(str(weights_path))
-        crnn.save_weights(str(ckpt_root / "best.weights.h5"))
-        logger.info("Saved phase weights: %s", weights_path)
+        # Save the last-epoch weights to a separate file for resuming/debugging.
+        # Do NOT overwrite best.weights.h5 here: with restore_best_weights=False
+        # the in-memory model holds the last epoch (not the best), so overwriting
+        # would clobber the best checkpoint saved by the callback.
+        last_weights_path = phase_ckpt.with_suffix(".last.weights.h5")
+        crnn.save_weights(str(last_weights_path))
+        logger.info(
+            "Saved phase last-epoch weights: %s (best so far val_loss=%.4f)",
+            last_weights_path,
+            best_tracker["val_loss"],
+        )
 
     # Save test split paths for evaluate
     test_list = ckpt_root / "test_samples.txt"
