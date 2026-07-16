@@ -22,6 +22,7 @@ from vie_handwritten.dataset import (
     ensure_manifests,
     load_manifest,
 )
+from vie_handwritten.debug import DecodeMetrics
 from vie_handwritten.evaluate import evaluate_split
 from vie_handwritten.model import CTCTrainer, build_crnn, load_crnn_weights, set_backbone_trainable
 from vie_handwritten.utils import configure_runtime, ensure_dir, load_config, project_root, save_config, set_seed
@@ -115,8 +116,23 @@ def train(
         records = _subsample(train_records, pcfg.get("max_train_samples"), seed)
         logger.info("[%s] training on %d samples", name, len(records))
         train_ds = build_dataset(records, charset=charset, config=config, training=True)
-        callbacks = [
-            save_best,
+        phase_log_dir = project_root() / log_root / name
+        callbacks = [save_best]
+        # Decode-based debug metrics (CER/WER + previews) on a fixed train sample.
+        n_decode = int(config["train"].get("decode_eval_samples", 0) or 0)
+        if n_decode:
+            callbacks.append(
+                DecodeMetrics(
+                    crnn,
+                    _subsample(records, n_decode, seed),
+                    charset,
+                    config,
+                    tag="train",
+                    preview_dir=phase_log_dir / "decode",
+                    every=int(config["train"].get("decode_eval_every", 1)),
+                )
+            )
+        callbacks += [
             keras.callbacks.EarlyStopping(
                 monitor="val_loss",
                 patience=int(config["train"].get("early_stopping_patience", 10)),
@@ -129,13 +145,15 @@ def train(
                 min_lr=1e-6,
                 verbose=1,
             ),
-            keras.callbacks.TensorBoard(log_dir=str(project_root() / log_root / name)),
+            # Kept last so it captures scalars injected by DecodeMetrics (cer/wer/lr).
+            keras.callbacks.TensorBoard(log_dir=str(phase_log_dir)),
         ]
         trainer.fit(
             train_ds,
             validation_data=val_ds,
             epochs=int(pcfg["epochs"]),
             callbacks=callbacks,
+            shuffle=False,  # tf.data already shuffles
             verbose=1,
         )
 

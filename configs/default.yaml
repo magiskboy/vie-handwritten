@@ -47,6 +47,10 @@ train:
   early_stopping_patience: 10
   reduce_lr_patience: 5
   reduce_lr_factor: 0.5
+  # Debug: mỗi `decode_eval_every` epoch, decode `decode_eval_samples` mẫu train để
+  # log CER/WER + preview (pred vs true) lên TensorBoard. Đặt 0 để tắt.
+  decode_eval_samples: 128
+  decode_eval_every: 1
   # Phase 1: đóng băng CNN, chỉ train BiLSTM head trên tập nhỏ để head hội tụ nhanh.
   phase1:
     epochs: 15

@@ -79,3 +79,33 @@ python main.py infer --image path/to/line.png --checkpoint checkpoints/best.weig
 
 Cả hai pha dùng chung `checkpoints/best.weights.h5` (theo `val_loss` thấp nhất).
 Mỗi pha là một lượt `model.fit` trên dataset hữu hạn (1 epoch = 1 lượt qua dữ liệu).
+
+## Debug quá trình training (overfit tập nhỏ)
+
+Theo Andrew Ng, trước khi train full hãy kiểm tra model có **hội tụ** không: cho model
+overfit một tập nhỏ lấy từ **cùng phân bố** với train thật — nếu đúng, cả *loss* và
+*error (CER)* phải tiến về ~0. Nếu không → có bug ở model / loss / data pipeline.
+
+```bash
+python main.py train --config configs/debug.yaml   # overfit 32 mẫu
+tensorboard --logdir runs/debug
+```
+
+`configs/debug.yaml` đã set sẵn để overfit: tắt dropout, tắt early-stopping / giảm LR,
+dùng đúng 32 mẫu cho cả train lẫn decode.
+
+Trên TensorBoard theo dõi:
+
+| Signal | Ở đâu | Kỳ vọng khi model đúng |
+|---|---|---|
+| CTC loss | `epoch_loss` (train), `val_loss` | giảm đều về ~0 |
+| Character Error Rate | `train_cer` | → ~0 |
+| Word Error Rate | `train_wer` | → ~0 |
+| Learning rate | `lr` | đúng như config |
+| Dự đoán vs nhãn | tab **TEXT** (`train/pred_vs_true`) | pred trùng dần với ground truth |
+| Ảnh input | tab **IMAGES** (`train/inputs`) | đúng ảnh + preprocess hợp lý |
+
+Bộ đo decode này (callback `DecodeMetrics` trong `debug.py`) cũng bật mặc định khi train
+thật qua `train.decode_eval_samples` (đặt `0` để tắt) — cho tín hiệu *accuracy* chứ không
+chỉ loss. Nếu overfit không về ~0: kiểm tra căn chỉnh nhãn↔ảnh, `input_length` của CTC,
+charset, và chiều rộng feature (`widths // 8`).

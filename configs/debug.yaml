@@ -1,0 +1,65 @@
+# DEBUG config — overfit a tiny slice of the REAL train distribution.
+#
+# Andrew Ng sanity check: nếu model ĐÚNG (model + loss + data pipeline không bug),
+# nó PHẢI overfit được vài chục mẫu → train loss ~ 0 và train CER ~ 0.
+# Nếu KHÔNG hội tụ về ~0 → có bug, đừng train full vội.
+#
+#   python main.py train --config configs/debug.yaml
+#   tensorboard --logdir runs/debug
+# Theo dõi: epoch_loss (val), train_cer, train_wer, lr, và tab TEXT/IMAGES
+# (pred vs true + ảnh input) — tất cả phải hội tụ.
+
+project:
+  name: vie-handwritten-debug
+  seed: 42
+
+data:
+  root_dir: data/images
+  manifest_dir: data/manifests
+  train_subdir: train_data
+  test_subdir: test_data
+  val_writers_ratio: 0.1
+  max_val_samples: 32
+  drop_oov: true
+  charset_path: data/charset/vietnamese.txt
+
+preprocess:
+  target_height: 64
+  max_width: 1024
+  pad_value: 255
+  use_clahe: true
+  clahe_clip_limit: 2.0
+  clahe_tile_grid: [8, 8]
+  normalize: imagenet
+  channels: 3
+
+model:
+  pretrained: imagenet
+  bilstm_units: 256
+  bilstm_layers: 2
+  dropout: 0.0                   # TẮT regularization để model CÓ THỂ overfit
+
+ctc:
+  blank_index: 0
+  decode: greedy
+  beam_width: 10
+
+train:
+  batch_size: 8
+  optimizer: adam
+  checkpoint_dir: checkpoints/debug
+  report_dir: reports/debug
+  log_dir: runs/debug
+  early_stopping_patience: 100000   # không dừng sớm khi debug
+  reduce_lr_patience: 100000        # giữ learning rate cố định
+  reduce_lr_factor: 0.5
+  decode_eval_samples: 32           # decode toàn bộ tập nhỏ mỗi epoch
+  decode_eval_every: 1
+  phase1:
+    epochs: 20
+    learning_rate: 0.001
+    max_train_samples: 32
+  phase2:
+    epochs: 200
+    learning_rate: 0.0005
+    max_train_samples: 32
