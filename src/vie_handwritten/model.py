@@ -228,13 +228,9 @@ class CTCTrainer(keras.Model):
         # Clamp to the actual T in case "same"-padding rounding makes T slightly smaller.
         time_steps = tf.cast(tf.shape(logits)[1], x["input_length"].dtype)
         logit_length = tf.minimum(x["input_length"], time_steps)
-        label_length = tf.cast(x["label_length"], logit_length.dtype)
-        tf.debugging.assert_greater_equal(
-            logit_length,
-            label_length,
-            message="CTC requires input_length >= label_length; increase image width "
-            "or check WIDTH_DOWNSAMPLE / label encoding.",
-        )
+        # Samples with too few time steps (T < label_length) are dropped in the data
+        # pipeline; ``ctc_loss`` additionally zeroes any non-finite per-example loss so a
+        # rare bad sample can never crash or poison a batch (cf. torch zero_infinity).
         return mean_ctc_loss(
             labels,
             logits,

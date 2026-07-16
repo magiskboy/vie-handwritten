@@ -239,6 +239,13 @@ def build_dataset(
     if training:
         ds = ds.shuffle(min(len(paths), 4096), reshuffle_each_iteration=True)
     ds = ds.map(_load, num_parallel_calls=tf.data.AUTOTUNE)
+    # Drop samples whose time-step budget can't fit the label (T < label_length):
+    # a too-narrow image vs a long label makes CTC invalid (+inf). These are rare
+    # bad/mislabeled samples; skipping them keeps training robust across the full set.
+    def _fits(image, label, label_len, width):
+        return tf.maximum(width // width_downsample, 1) >= label_len
+
+    ds = ds.filter(_fits)
     ds = ds.padded_batch(
         batch_size,
         padded_shapes=([height, None, channels], [None], [], []),

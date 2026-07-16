@@ -31,6 +31,10 @@ def ctc_loss(
         logits_time_major=False,
         blank_index=blank_index,
     )
+    # zero_infinity: when a sample's time steps can't fit its label (T < label_length,
+    # or repeats needing extra blanks) CTC returns +inf; zero it so one bad sample in a
+    # batch can't blow up the mean loss / gradients (mirrors torch ``zero_infinity=True``).
+    per_example = tf.where(tf.math.is_finite(per_example), per_example, tf.zeros_like(per_example))
     return tf.reduce_mean(per_example)
 
 
