@@ -21,14 +21,14 @@ htmlcov/
 .DS_Store
 *.swp
 
-# Data & artifacts (keep folder structure via .gitkeep)
-data/raw/*
-!data/raw/.gitkeep
-data/processed/*
-!data/processed/.gitkeep
-# Large image corpus — keep labels.json trackable if desired
-data/vn_handwritten_images/data/
-data/vn_handwritten_images/.DS_Store
+# Data: toàn bộ được nén thành data.zip và KHÔNG đẩy lên git.
+# Ngoại lệ: charset (bảng ký tự) nhỏ và cần để chạy code nên vẫn track.
+/data/*
+!/data/charset/
+# Archive nén của thư mục data (backup/chia sẻ ngoài git)
+*.zip
+
+# Artifacts
 checkpoints/*
 !checkpoints/.gitkeep
 runs/

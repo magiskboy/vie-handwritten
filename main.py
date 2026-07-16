@@ -23,9 +23,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
+    data_p = sub.add_parser("build-data", help="Build normalized JSONL manifests")
+    data_p.add_argument("--config", default="configs/default.yaml")
+    data_p.add_argument("--rebuild", action="store_true", help="Rebuild manifests")
+
     train_p = sub.add_parser("train", help="Train CRNN model")
     train_p.add_argument("--config", default="configs/default.yaml")
     train_p.add_argument("--resume", default=None, help="Checkpoint weights to resume from")
+    train_p.add_argument(
+        "--rebuild-data",
+        action="store_true",
+        help="Rebuild manifests before training",
+    )
     train_p.add_argument(
         "--max-samples",
         type=int,
@@ -37,6 +46,13 @@ def build_parser() -> argparse.ArgumentParser:
     eval_p.add_argument("--config", default="configs/default.yaml")
     eval_p.add_argument("--checkpoint", required=True)
     eval_p.add_argument("--split", default="test", choices=["train", "val", "test"])
+    eval_p.add_argument(
+        "--source",
+        default=None,
+        choices=["line", "word", "paragraph"],
+        help="Restrict evaluation to one source (default: config eval_source / all)",
+    )
+    eval_p.add_argument("--max-samples", type=int, default=None)
 
     infer_p = sub.add_parser("infer", help="Run OCR on an image")
     infer_p.add_argument("--image", required=True)
@@ -51,14 +67,38 @@ def main(argv: list[str] | None = None) -> None:
     parser = build_parser()
     args = parser.parse_args(argv)
 
-    if args.command == "train":
+    if args.command == "build-data":
+        import json
+
+        from vie_handwritten.config import load_config
+        from vie_handwritten.dataset import build_manifests
+
+        paths = build_manifests(load_config(args.config))
+        summary_file = paths["train"].parent / "summary.json"
+        if summary_file.is_file():
+            summary = json.loads(summary_file.read_text(encoding="utf-8"))
+            print(json.dumps(summary["counts"], ensure_ascii=False, indent=2))
+        for split, path in paths.items():
+            print(f"{split}: {path}")
+    elif args.command == "train":
         from vie_handwritten.train import train
 
-        train(args.config, resume_from=args.resume, max_samples=args.max_samples)
+        train(
+            args.config,
+            resume_from=args.resume,
+            max_samples=args.max_samples,
+            rebuild_data=args.rebuild_data,
+        )
     elif args.command == "evaluate":
         from vie_handwritten.evaluate import evaluate
 
-        metrics = evaluate(args.config, args.checkpoint, split=args.split)
+        metrics = evaluate(
+            args.config,
+            args.checkpoint,
+            split=args.split,
+            source=args.source,
+            max_samples=args.max_samples,
+        )
         print(
             f"split={args.split} n={metrics['n']} "
             f"CER={metrics['cer']:.4f} WER={metrics['wer']:.4f}"

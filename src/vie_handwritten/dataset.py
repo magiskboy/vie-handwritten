@@ -1,160 +1,269 @@
-"""Dataset loading and ``tf.data`` pipelines.
+"""Dataset discovery, manifest building, and ``tf.data`` pipelines.
 
-Expected on-disk layout (see ``data/vn_handwritten_images``)::
+On-disk layout (HWDB, official split by writer)::
 
-    <dataset_dir>/
-      labels.json          # {"1.jpg": "Số 3 Nguyễn Ngọc Vũ, Hà Nội", ...}
-      data/
-        1.jpg
-        0001_samples.png
-        ...
+    <root_dir>/                       # e.g. data/images
+      HWDB_line/
+        train_data/<writer_id>/
+          1.jpg, 2.jpg, ...
+          label.json                  # {"1.jpg": "văn bản dòng", ...}
+        test_data/<writer_id>/...
+      HWDB_word/
+        train_data/<writer_id>/...    # ảnh từ đơn
+        test_data/<writer_id>/...
 
-``labels.json`` keys are filenames relative to ``data/`` (images_subdir).
+``line`` và ``word`` là cùng corpus ở 2 mức chi tiết (từ và dòng) → đều là
+"một dòng chữ" nên feed thẳng vào CRNN+CTC. ``paragraph`` (ảnh nguyên trang
+nhiều dòng) hiện KHÔNG dùng để train CRNN.
+
+Chuẩn hoá:
+- Mỗi writer folder đọc ``label.json`` (fallback ``labels.json`` rồi thống nhất
+  về ``label.json`` khi build).
+- Split theo *writer* (writer-independent): ``test`` = ``test_data`` chính thức,
+  ``val`` = một phần writers tách ra từ ``train_data``.
+- Sinh manifest JSONL chuẩn hoá (``data/manifests/{train,val,test}.jsonl``) để
+  mọi bước train/eval chỉ đọc manifest, tách khỏi layout đĩa.
 """
 
 from __future__ import annotations
 
 import json
+import logging
+import random
+import unicodedata
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterable
 
 import numpy as np
-import tensorflow as tf
-from sklearn.model_selection import train_test_split
 
 from vie_handwritten.preprocess import load_image, preprocess
+from vie_handwritten.utils import project_root
+
+logger = logging.getLogger(__name__)
+
+SOURCE_DIRS: dict[str, str] = {
+    "line": "HWDB_line",
+    "word": "HWDB_word",
+    "paragraph": "HWDB_paragraph",
+}
+
+_IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff")
 
 
-def load_labels(labels_path: str | Path) -> dict[str, str]:
-    """Load ``labels.json`` → ``{filename: transcription}``."""
-    path = Path(labels_path)
-    with path.open(encoding="utf-8") as f:
-        data = json.load(f)
-    if not isinstance(data, dict):
-        raise ValueError(f"labels.json must be an object: {path}")
-    return {str(k): str(v) for k, v in data.items()}
+# --------------------------------------------------------------------------- #
+# Discovery
+# --------------------------------------------------------------------------- #
+def _abs_path(path: str | Path) -> Path:
+    """Resolve a possibly-relative path against the project root."""
+    p = Path(path)
+    return p if p.is_absolute() else project_root() / p
 
 
-def discover_samples(
-    dataset_dir: str | Path,
-    *,
-    images_subdir: str = "data",
-    labels_file: str = "labels.json",
-) -> list[tuple[Path, str]]:
-    """Discover ``(image_path, transcription)`` pairs."""
-    dataset_dir = Path(dataset_dir)
-    labels = load_labels(dataset_dir / labels_file)
-    images_dir = dataset_dir / images_subdir
-    samples: list[tuple[Path, str]] = []
-    missing: list[str] = []
-    for name, text in labels.items():
-        path = images_dir / name
-        if not path.is_file():
-            missing.append(name)
-            continue
-        samples.append((path, text))
+def _read_writer_labels(writer_dir: Path) -> dict[str, str]:
+    """Read ``label.json`` (or legacy ``labels.json``) → ``{filename: text}``."""
+    for name in ("label.json", "labels.json"):
+        f = writer_dir / name
+        if f.is_file():
+            with f.open(encoding="utf-8") as fh:
+                data = json.load(fh)
+            if not isinstance(data, dict):
+                logger.warning("Skipping non-object label file: %s", f)
+                return {}
+            return {str(k): str(v) for k, v in data.items()}
+    return {}
+
+
+def _resolve_image(writer_dir: Path, name: str) -> Path | None:
+    """Resolve an image filename, tolerating case/extension differences."""
+    exact = writer_dir / name
+    if exact.is_file():
+        return exact
+    stem = Path(name).stem
+    for cand in writer_dir.glob(f"{stem}.*"):
+        if cand.is_file() and cand.suffix.lower() in _IMAGE_EXTS:
+            return cand
+    return None
+
+
+def discover_source(
+    root_dir: str | Path,
+    source: str,
+    subdir: str,
+) -> list[dict[str, str]]:
+    """Discover records for one source (``line``/``word``) and split subdir.
+
+    Returns dicts ``{"image": <rel to root_dir>, "text", "source", "writer"}``.
+    """
+    if source not in SOURCE_DIRS:
+        raise ValueError(f"Unknown source={source!r} (expected {list(SOURCE_DIRS)})")
+    root_dir = _abs_path(root_dir)
+    src_root = root_dir / SOURCE_DIRS[source] / subdir
+    records: list[dict[str, str]] = []
+    if not src_root.is_dir():
+        logger.warning("Source dir missing: %s", src_root)
+        return records
+    missing = 0
+    for writer_dir in sorted(p for p in src_root.iterdir() if p.is_dir()):
+        labels = _read_writer_labels(writer_dir)
+        for name, text in labels.items():
+            img = _resolve_image(writer_dir, name)
+            if img is None:
+                missing += 1
+                continue
+            records.append(
+                {
+                    "image": str(img.relative_to(root_dir)),
+                    "text": text,
+                    "source": source,
+                    "writer": writer_dir.name,
+                }
+            )
     if missing:
-        raise FileNotFoundError(
-            f"{len(missing)} labeled images missing under {images_dir} "
-            f"(e.g. {missing[:5]})"
-        )
-    if not samples:
-        raise ValueError(f"No samples found in {dataset_dir}")
-    return samples
+        logger.warning("%s/%s: %d labeled images not found on disk", source, subdir, missing)
+    return records
 
 
-def train_val_test_split(
-    samples: list[tuple[Path, str]],
-    *,
-    train_ratio: float,
-    val_ratio: float,
-    test_ratio: float,
-    seed: int = 42,
-) -> tuple[list, list, list]:
-    """Split samples with scikit-learn."""
-    total = train_ratio + val_ratio + test_ratio
-    if abs(total - 1.0) > 1e-6:
-        raise ValueError(f"Split ratios must sum to 1, got {total}")
-    train_samples, temp = train_test_split(
-        samples, train_size=train_ratio, random_state=seed, shuffle=True
-    )
-    relative_val = val_ratio / (val_ratio + test_ratio)
-    val_samples, test_samples = train_test_split(
-        temp, train_size=relative_val, random_state=seed, shuffle=True
-    )
-    return train_samples, val_samples, test_samples
+# --------------------------------------------------------------------------- #
+# Manifest building (writer-independent split + OOV filter)
+# --------------------------------------------------------------------------- #
+def _normalize_text(text: str) -> str:
+    """Unicode NFC normalize (keep casing, diacritics, spaces)."""
+    return unicodedata.normalize("NFC", text)
 
 
-def encode_batch(
-    images: list,
-    texts: list[str],
-    *,
-    charset: Any,
-    preprocess_config: dict[str, Any],
-) -> dict[str, Any]:
-    """Preprocess images and encode labels for one CTC training batch."""
-    processed = [preprocess(img, preprocess_config) for img in images]
-    max_w = max(p.shape[1] for p in processed)
-    max_w = min(max_w, int(preprocess_config.get("max_width", max_w)))
-    pad_value = int(preprocess_config.get("pad_value", 255))
-    # After normalize, pad with ImageNet-normalized white ≈ (1-mean)/std for white
-    # Prefer padding before normalize in preprocess; here images already normalized.
-    # Pad with zeros in feature space (neutral after centering is imperfect but OK).
-    padded = []
-    for p in processed:
-        if p.shape[1] < max_w:
-            h, w, c = p.shape
-            canvas = np.zeros((h, max_w, c), dtype=np.float32)
-            canvas[:, :w] = p
-            # approximate white pad in imagenet space
-            if preprocess_config.get("normalize") == "imagenet":
-                white = (np.ones(3, dtype=np.float32) - np.array([0.485, 0.456, 0.406])) / np.array(
-                    [0.229, 0.224, 0.225]
-                )
-                canvas[:, w:] = white.reshape(1, 1, 3)
-            elif pad_value:
-                canvas[:, w:] = pad_value / 255.0 if p.dtype != np.uint8 else pad_value
-            padded.append(canvas)
-        else:
-            padded.append(p[:, :max_w])
-
-    encoded = [charset.encode(t) for t in texts]
-    max_label = max((len(e) for e in encoded), default=1)
-    labels = np.zeros((len(encoded), max_label), dtype=np.int32)
-    label_length = np.zeros((len(encoded),), dtype=np.int32)
-    for i, e in enumerate(encoded):
-        labels[i, : len(e)] = e
-        label_length[i] = len(e)
-
-    batch_images = np.stack(padded, axis=0).astype(np.float32)
-    # Approximate CTC input length from width after ResNet HTR downsampling (~/8)
-    input_length = np.full((len(padded),), max(1, max_w // 8), dtype=np.int32)
-    return {
-        "images": batch_images,
-        "labels": labels,
-        "label_length": label_length,
-        "input_length": input_length,
-    }
+def _oov_chars(text: str, vocab: set[str]) -> set[str]:
+    return {ch for ch in text if ch not in vocab}
 
 
-def build_tf_dataset(
-    samples: list[tuple[Path, str]],
-    *,
-    charset: Any,
-    config: dict[str, Any],
-    training: bool = True,
-) -> Any:
-    """Build a ``tf.data.Dataset`` yielding model inputs + CTC targets."""
-    preprocess_config = config["preprocess"]
-    batch_size = int(config["train"]["batch_size"])
+def build_manifests(config: dict[str, Any]) -> dict[str, Path]:
+    """Scan datasets, split by writer, filter OOV, and write JSONL manifests.
+
+    Returns ``{"train": path, "val": path, "test": path}``.
+    """
+    from vie_handwritten.charset import Charset
+
+    data_cfg = config["data"]
+    root_dir = _abs_path(data_cfg["root_dir"])
+    manifest_dir = _abs_path(data_cfg.get("manifest_dir", "data/manifests"))
+    manifest_dir.mkdir(parents=True, exist_ok=True)
+    sources = list(data_cfg.get("sources", ["line", "word"]))
+    train_subdir = data_cfg.get("train_subdir", "train_data")
+    test_subdir = data_cfg.get("test_subdir", "test_data")
+    val_ratio = float(data_cfg.get("val_writers_ratio", 0.1))
+    drop_oov = bool(data_cfg.get("drop_oov", True))
     seed = int(config.get("project", {}).get("seed", 42))
-    curriculum_epochs = int(config["train"].get("curriculum_short_bias_epochs", 0))
 
-    paths = [str(p) for p, _ in samples]
-    texts = [t for _, t in samples]
-    lengths = np.array([len(t) for t in texts], dtype=np.int32)
+    charset = Charset.from_file(_abs_path(data_cfg["charset_path"]))
+    vocab = set(charset.characters[1:])  # exclude blank at index 0
 
-    def _load_one(path: tf.Tensor, text: tf.Tensor) -> tuple:
+    train_records = {s: discover_source(root_dir, s, train_subdir) for s in sources}
+    test_records = {s: discover_source(root_dir, s, test_subdir) for s in sources}
+
+    # Writer-independent val split: hold out the SAME writer ids across sources.
+    all_writers = sorted(
+        {r["writer"] for recs in train_records.values() for r in recs}
+    )
+    rng = random.Random(seed)
+    rng.shuffle(all_writers)
+    n_val = max(1, round(len(all_writers) * val_ratio)) if all_writers else 0
+    val_writers = set(all_writers[:n_val])
+    logger.info(
+        "Writers: total=%d val=%d train=%d",
+        len(all_writers),
+        len(val_writers),
+        len(all_writers) - len(val_writers),
+    )
+
+    dropped = 0
+    stats: dict[str, dict[str, int]] = {"train": {}, "val": {}, "test": {}}
+    buckets: dict[str, list[dict[str, str]]] = {"train": [], "val": [], "test": []}
+
+    def _accept(rec: dict[str, str], split: str) -> None:
+        nonlocal dropped
+        text = _normalize_text(rec["text"])
+        if drop_oov and _oov_chars(text, vocab):
+            dropped += 1
+            return
+        rec = {**rec, "text": text, "split": split}
+        buckets[split].append(rec)
+        stats[split][rec["source"]] = stats[split].get(rec["source"], 0) + 1
+
+    for s in sources:
+        for r in train_records[s]:
+            _accept(r, "val" if r["writer"] in val_writers else "train")
+        for r in test_records[s]:
+            _accept(r, "test")
+
+    paths: dict[str, Path] = {}
+    for split, recs in buckets.items():
+        out = manifest_dir / f"{split}.jsonl"
+        with out.open("w", encoding="utf-8") as fh:
+            for rec in recs:
+                fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        paths[split] = out
+
+    summary = {
+        "root_dir": str(root_dir),
+        "sources": sources,
+        "seed": seed,
+        "val_writers_ratio": val_ratio,
+        "drop_oov": drop_oov,
+        "dropped_oov": dropped,
+        "counts": {k: {"total": len(v), **stats[k]} for k, v in buckets.items()},
+        "val_writers": sorted(val_writers),
+    }
+    (manifest_dir / "summary.json").write_text(
+        json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    logger.info("Manifests written to %s | counts=%s dropped_oov=%d",
+                manifest_dir, {k: len(v) for k, v in buckets.items()}, dropped)
+    return paths
+
+
+def load_manifest(path: str | Path) -> list[dict[str, str]]:
+    """Load a JSONL manifest into a list of record dicts."""
+    path = Path(path)
+    records: list[dict[str, str]] = []
+    with path.open(encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if line:
+                records.append(json.loads(line))
+    return records
+
+
+def manifest_paths(config: dict[str, Any]) -> dict[str, Path]:
+    """Return expected manifest paths (does not build them)."""
+    manifest_dir = _abs_path(config["data"].get("manifest_dir", "data/manifests"))
+    return {s: manifest_dir / f"{s}.jsonl" for s in ("train", "val", "test")}
+
+
+def ensure_manifests(config: dict[str, Any], *, rebuild: bool = False) -> dict[str, Path]:
+    """Build manifests if missing (or ``rebuild``), then return their paths."""
+    paths = manifest_paths(config)
+    if rebuild or not all(p.is_file() for p in paths.values()):
+        return build_manifests(config)
+    return paths
+
+
+def group_by_source(records: Iterable[dict[str, str]]) -> dict[str, list[dict[str, str]]]:
+    """Group manifest records by their ``source`` field."""
+    grouped: dict[str, list[dict[str, str]]] = {}
+    for r in records:
+        grouped.setdefault(r["source"], []).append(r)
+    return grouped
+
+
+# --------------------------------------------------------------------------- #
+# tf.data pipelines
+# --------------------------------------------------------------------------- #
+def _make_load_fn(charset: Any, preprocess_config: dict[str, Any], root_dir: Path):
+    import tensorflow as tf
+
+    channels = int(preprocess_config.get("channels", 3))
+    height = int(preprocess_config.get("target_height", 64))
+
+    def _load_one(path: tf.Tensor, text: tf.Tensor):
         def _py(path_bytes, text_bytes):
             p = path_bytes.numpy().decode("utf-8")
             t = text_bytes.numpy().decode("utf-8")
@@ -169,45 +278,64 @@ def build_tf_dataset(
             )
 
         image, label, label_len, width = tf.py_function(
-            _py,
-            [path, text],
-            [tf.float32, tf.int32, tf.int32, tf.int32],
+            _py, [path, text], [tf.float32, tf.int32, tf.int32, tf.int32]
         )
-        channels = int(preprocess_config.get("channels", 3))
-        height = int(preprocess_config.get("target_height", 64))
         image.set_shape([height, None, channels])
         label.set_shape([None])
         label_len.set_shape([])
         width.set_shape([])
         return image, label, label_len, width
 
+    return _load_one
+
+
+def _source_dataset(
+    records: list[dict[str, str]],
+    *,
+    charset: Any,
+    config: dict[str, Any],
+    root_dir: Path,
+    training: bool,
+    repeat: bool,
+    seed: int,
+) -> "Any":
+    import tensorflow as tf
+
+    preprocess_config = config["preprocess"]
+    paths = [str(root_dir / r["image"]) for r in records]
+    texts = [r["text"] for r in records]
     ds = tf.data.Dataset.from_tensor_slices((paths, texts))
     if training:
-        if curriculum_epochs > 0:
-            # Prefer shorter labels early: sort by length then shuffle lightly
-            order = np.argsort(lengths)
-            paths_sorted = [paths[i] for i in order]
-            texts_sorted = [texts[i] for i in order]
-            ds = tf.data.Dataset.from_tensor_slices((paths_sorted, texts_sorted))
-        ds = ds.shuffle(buffer_size=min(len(samples), 1024), seed=seed, reshuffle_each_iteration=True)
+        ds = ds.shuffle(
+            buffer_size=min(len(paths), 4096),
+            seed=seed,
+            reshuffle_each_iteration=True,
+        )
+    if repeat:
+        ds = ds.repeat()
+    ds = ds.map(
+        _make_load_fn(charset, preprocess_config, root_dir),
+        num_parallel_calls=tf.data.AUTOTUNE,
+    )
+    return ds
 
-    ds = ds.map(_load_one, num_parallel_calls=tf.data.AUTOTUNE)
+
+def _batch_and_format(ds: "Any", config: dict[str, Any]) -> "Any":
+    import tensorflow as tf
+
+    preprocess_config = config["preprocess"]
+    batch_size = int(config["train"]["batch_size"])
+    channels = int(preprocess_config.get("channels", 3))
+    height = int(preprocess_config.get("target_height", 64))
 
     pad_value = 0.0
     if preprocess_config.get("normalize") == "imagenet":
         white = (1.0 - np.array([0.485, 0.456, 0.406])) / np.array([0.229, 0.224, 0.225])
         pad_value = float(white.mean())
 
-    channels = int(preprocess_config.get("channels", 3))
-    height = int(preprocess_config.get("target_height", 64))
     ds = ds.padded_batch(
         batch_size,
-        padded_shapes=(
-            [height, None, channels],
-            [None],
-            [],
-            [],
-        ),
+        padded_shapes=([height, None, channels], [None], [], []),
         padding_values=(
             tf.constant(pad_value, dtype=tf.float32),
             tf.constant(0, dtype=tf.int32),
@@ -230,6 +358,84 @@ def build_tf_dataset(
     return ds.prefetch(tf.data.AUTOTUNE)
 
 
-def iter_samples(samples: list[tuple[Path, str]]) -> Iterator[tuple[Path, str]]:
-    """Simple iterator over sample pairs (for debugging)."""
-    yield from samples
+def build_training_dataset(
+    records_by_source: dict[str, list[dict[str, str]]],
+    *,
+    weights: dict[str, float],
+    charset: Any,
+    config: dict[str, Any],
+    seed: int = 42,
+) -> "Any":
+    """Build an (infinite) training dataset mixing sources by ``weights``.
+
+    Each source is shuffled + repeated, then interleaved with
+    ``tf.data.Dataset.sample_from_datasets``. Use ``steps_per_epoch`` in
+    ``model.fit`` because the dataset repeats forever.
+    """
+    import tensorflow as tf
+
+    root_dir = _abs_path(config["data"]["root_dir"])
+    datasets: list[Any] = []
+    src_weights: list[float] = []
+    used: list[str] = []
+    for source, records in records_by_source.items():
+        if not records:
+            continue
+        w = float(weights.get(source, 0.0))
+        if w <= 0:
+            continue
+        datasets.append(
+            _source_dataset(
+                records,
+                charset=charset,
+                config=config,
+                root_dir=root_dir,
+                training=True,
+                repeat=True,
+                seed=seed,
+            )
+        )
+        src_weights.append(w)
+        used.append(source)
+    if not datasets:
+        raise ValueError(f"No training records for weights={weights}")
+    total = sum(src_weights)
+    src_weights = [w / total for w in src_weights]
+    logger.info("Mixing sources %s with weights %s", used, [round(w, 3) for w in src_weights])
+    if len(datasets) == 1:
+        ds = datasets[0]
+    else:
+        ds = tf.data.Dataset.sample_from_datasets(
+            datasets, weights=src_weights, seed=seed, stop_on_empty_dataset=False
+        )
+    return _batch_and_format(ds, config)
+
+
+def build_eval_dataset(
+    records: list[dict[str, str]],
+    *,
+    charset: Any,
+    config: dict[str, Any],
+    max_samples: int | None = None,
+    seed: int = 42,
+) -> "Any":
+    """Build a finite dataset for validation/eval (no mixing, no repeat)."""
+    root_dir = _abs_path(config["data"]["root_dir"])
+    if max_samples is not None and len(records) > max_samples:
+        rng = random.Random(seed)
+        records = rng.sample(records, max_samples)
+    ds = _source_dataset(
+        records,
+        charset=charset,
+        config=config,
+        root_dir=root_dir,
+        training=False,
+        repeat=False,
+        seed=seed,
+    )
+    return _batch_and_format(ds, config)
+
+
+def resolve_image_path(config: dict[str, Any], record: dict[str, str]) -> Path:
+    """Absolute image path for a manifest record."""
+    return _abs_path(config["data"]["root_dir"]) / record["image"]

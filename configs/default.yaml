@@ -6,17 +6,25 @@ project:
   seed: 42
 
 data:
-  # data/vn_handwritten_images/
-  #   labels.json          # {"1.jpg": "Số 3 ...", "0001_samples.png": "...", ...}
-  #   data/<filename>      # ảnh dòng chữ (png/jpg/jpeg)
-  dataset_dir: data/vn_handwritten_images
-  images_subdir: data
-  labels_file: labels.json
-  processed_dir: data/processed
+  # HWDB layout (split chính thức theo người viết):
+  #   data/images/HWDB_line/{train_data,test_data}/<writer>/label.json + *.jpg
+  #   data/images/HWDB_word/{train_data,test_data}/<writer>/label.json + *.jpg
+  # line = ảnh dòng, word = ảnh từ đơn → cùng corpus, đều feed thẳng CRNN+CTC.
+  # paragraph (ảnh nguyên trang) hiện KHÔNG dùng để train.
+  root_dir: data/images
+  manifest_dir: data/manifests
+  sources: [line, word]          # nguồn dùng để train CRNN
+  val_sources: [line]            # val theo mục tiêu triển khai (đọc dòng)
+  eval_source: line              # evaluate mặc định trên line
+  train_subdir: train_data
+  test_subdir: test_data
+  val_writers_ratio: 0.1         # tách ~10% writers từ train_data làm val
+  max_val_samples: 2000          # giới hạn số mẫu val cho nhanh
+  drop_oov: true                 # bỏ mẫu chứa ký tự ngoài charset
   charset_path: data/charset/vietnamese.txt
-  train_split: 0.8
-  val_split: 0.1
-  test_split: 0.1
+  processed_dir: data/processed
+  # Trọng số trộn nguồn mặc định (có thể override theo từng pha ở train.phases)
+  source_weights: {line: 0.5, word: 0.5}
 
 preprocess:
   target_height: 64
@@ -48,23 +56,30 @@ ctc:
 train:
   batch_size: 16
   optimizer: adam
+  # Dataset trộn nguồn lặp vô hạn → cần steps_per_epoch cho mỗi epoch.
+  steps_per_epoch: 500
   early_stopping_patience: 10
   reduce_lr_patience: 5
   reduce_lr_factor: 0.5
   checkpoint_dir: checkpoints
   log_dir: runs
-  curriculum_short_bias_epochs: 5
   mixed_precision: false
   phases:
-    - name: a_head
-      epochs: 40
+    # Pha A — warmup/head: đóng băng backbone (ImageNet), chỉ train BiLSTM+Dense.
+    # Nghiêng về word (110k ảnh, ngắn) để học nhanh ánh xạ đặc trưng→ký tự.
+    - name: a_warmup
+      epochs: 15
       learning_rate: 0.001
       freeze_backbone: true
+      source_weights: {word: 0.7, line: 0.3}
+    # Pha B — finetune: mở băng từ layer3 (giữ stem/layer1/layer2), LR nhỏ.
+    # Nghiêng về line để chuyên hoá đọc dòng dài / khoảng trắng / ngữ cảnh.
     - name: b_finetune
-      epochs: 60
+      epochs: 40
       learning_rate: 0.0001
       freeze_backbone: false
       unfreeze_from: layer3
+      source_weights: {line: 0.85, word: 0.15}
 
 eval:
   metrics: [cer, wer]  # Character / Word Error Rate

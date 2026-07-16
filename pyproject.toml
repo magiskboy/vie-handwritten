@@ -16,7 +16,7 @@ dependencies = [
     "pyyaml>=6.0",
     "editdistance>=0.8",
     "tqdm>=4.66",
-    "tensorflow[and-cuda]>=2.19.1",
+    "tensorflow[and-cuda]>=2.19.1; sys_platform == 'linux'",
 ]
 
 [project.optional-dependencies]

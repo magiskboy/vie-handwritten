@@ -11,7 +11,13 @@ from tensorflow import keras
 
 from vie_handwritten.charset import Charset
 from vie_handwritten.config import load_config, save_config
-from vie_handwritten.dataset import build_tf_dataset, discover_samples, train_val_test_split
+from vie_handwritten.dataset import (
+    build_eval_dataset,
+    build_training_dataset,
+    ensure_manifests,
+    group_by_source,
+    load_manifest,
+)
 from vie_handwritten.model import CTCModel, build_crnn, set_backbone_trainable
 from vie_handwritten.utils import configure_runtime, ensure_dir, project_root, set_seed
 
@@ -95,16 +101,11 @@ def compile_model(model: CTCModel, config: dict[str, Any], *, learning_rate: flo
     return model
 
 
-def _resolve_data_paths(config: dict[str, Any]) -> tuple[Path, Path]:
-    root = project_root()
-    data_cfg = config["data"]
-    dataset_dir = Path(data_cfg["dataset_dir"])
-    if not dataset_dir.is_absolute():
-        dataset_dir = root / dataset_dir
-    charset_path = Path(data_cfg["charset_path"])
+def _resolve_charset_path(config: dict[str, Any]) -> Path:
+    charset_path = Path(config["data"]["charset_path"])
     if not charset_path.is_absolute():
-        charset_path = root / charset_path
-    return dataset_dir, charset_path
+        charset_path = project_root() / charset_path
+    return charset_path
 
 
 def train(
@@ -112,6 +113,7 @@ def train(
     *,
     resume_from: str | Path | None = None,
     max_samples: int | None = None,
+    rebuild_data: bool = False,
 ) -> Any:
     """Full training entry: load data → build CRNN → 2-phase fit → save checkpoint."""
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
@@ -126,35 +128,38 @@ def train(
         keras.mixed_precision.set_global_policy("mixed_float16")
         logger.info("Mixed precision enabled")
 
-    dataset_dir, charset_path = _resolve_data_paths(config)
-    charset = Charset.from_file(charset_path)
+    charset = Charset.from_file(_resolve_charset_path(config))
     logger.info("Charset classes: %d", charset.num_classes)
 
-    samples = discover_samples(
-        dataset_dir,
-        images_subdir=config["data"].get("images_subdir", "data"),
-        labels_file=config["data"].get("labels_file", "labels.json"),
-    )
+    manifests = ensure_manifests(config, rebuild=rebuild_data)
+    train_records = load_manifest(manifests["train"])
+    val_records = load_manifest(manifests["val"])
     if max_samples is not None:
-        if max_samples < 3:
-            raise ValueError("max_samples must be >= 3 to allow train/val/test split")
         rng = __import__("random").Random(seed)
-        samples = list(samples)
-        rng.shuffle(samples)
-        samples = samples[:max_samples]
-        logger.info("Using subset of %d samples (--max-samples)", len(samples))
+        rng.shuffle(train_records)
+        train_records = train_records[:max_samples]
+        logger.info("Using subset of %d train samples (--max-samples)", len(train_records))
 
-    train_s, val_s, test_s = train_val_test_split(
-        samples,
-        train_ratio=float(config["data"]["train_split"]),
-        val_ratio=float(config["data"]["val_split"]),
-        test_ratio=float(config["data"]["test_split"]),
+    train_by_source = group_by_source(train_records)
+    logger.info(
+        "Train records by source: %s (val=%d)",
+        {s: len(r) for s, r in train_by_source.items()},
+        len(val_records),
+    )
+
+    # Validation reflects the deployment objective (line recognition by default).
+    val_sources = set(config["data"].get("val_sources", ["line"]))
+    val_eval_records = [r for r in val_records if r["source"] in val_sources] or val_records
+    val_ds = build_eval_dataset(
+        val_eval_records,
+        charset=charset,
+        config=config,
+        max_samples=config["data"].get("max_val_samples"),
         seed=seed,
     )
-    logger.info("Splits train/val/test: %d / %d / %d", len(train_s), len(val_s), len(test_s))
 
-    train_ds = build_tf_dataset(train_s, charset=charset, config=config, training=True)
-    val_ds = build_tf_dataset(val_s, charset=charset, config=config, training=False)
+    default_weights = dict(config["data"].get("source_weights", {}))
+    steps_per_epoch = int(config["train"].get("steps_per_epoch", 500))
 
     ckpt_root = ensure_dir(project_root() / config["train"].get("checkpoint_dir", "checkpoints"))
     save_config(config, ckpt_root / "config_used.yaml")
@@ -170,13 +175,20 @@ def train(
     ctc_model = CTCModel(crnn, blank_index=blank_index, name="ctc_crnn")
 
     phases = config["train"].get("phases") or [
-        {"name": "a_head", "epochs": 40, "learning_rate": 1e-3, "freeze_backbone": True},
+        {
+            "name": "a_warmup",
+            "epochs": 15,
+            "learning_rate": 1e-3,
+            "freeze_backbone": True,
+            "source_weights": {"word": 0.7, "line": 0.3},
+        },
         {
             "name": "b_finetune",
-            "epochs": 60,
+            "epochs": 40,
             "learning_rate": 1e-4,
             "freeze_backbone": False,
             "unfreeze_from": "layer3",
+            "source_weights": {"line": 0.85, "word": 0.15},
         },
     ]
 
@@ -200,6 +212,19 @@ def train(
         trainable = sum(int(tf.size(w)) for w in crnn.trainable_weights)
         logger.info("Trainable parameters: %s", f"{trainable:,}")
 
+        # Per-phase source mixing (fall back to global data.source_weights, else
+        # equal weight over the sources actually present in the manifest).
+        weights = dict(phase.get("source_weights", default_weights))
+        if not weights:
+            weights = {s: 1.0 for s in train_by_source}
+        train_ds = build_training_dataset(
+            train_by_source,
+            weights=weights,
+            charset=charset,
+            config=config,
+            seed=seed,
+        )
+
         phase_ckpt = ckpt_root / f"{phase_name}.keras"
         callbacks = build_callbacks(
             config,
@@ -213,8 +238,9 @@ def train(
             train_ds,
             validation_data=val_ds,
             epochs=int(phase["epochs"]),
+            steps_per_epoch=steps_per_epoch,
             callbacks=callbacks,
-            shuffle=False,  # tf.data already shuffled
+            shuffle=False,  # tf.data already shuffled + mixed
             verbose=1,
         )
         history_all[phase_name] = history.history
@@ -231,11 +257,9 @@ def train(
             best_tracker["val_loss"],
         )
 
-    # Save test split paths for evaluate
-    test_list = ckpt_root / "test_samples.txt"
-    with test_list.open("w", encoding="utf-8") as f:
-        for path, text in test_s:
-            f.write(f"{path}\t{text}\n")
-
-    logger.info("Training complete. Best weights: %s", ckpt_root / "best.weights.h5")
+    logger.info(
+        "Training complete. Best weights: %s | test manifest: %s",
+        ckpt_root / "best.weights.h5",
+        manifests["test"],
+    )
     return ctc_model

@@ -8,7 +8,7 @@ from pathlib import Path
 from vie_handwritten.charset import Charset
 from vie_handwritten.config import load_config
 from vie_handwritten.ctc import decode_predictions
-from vie_handwritten.dataset import discover_samples, train_val_test_split
+from vie_handwritten.dataset import ensure_manifests, load_manifest, resolve_image_path
 from vie_handwritten.metrics import evaluate_corpus
 from vie_handwritten.model import build_crnn, load_crnn_weights
 from vie_handwritten.postprocess import postprocess
@@ -23,35 +23,33 @@ def evaluate(
     checkpoint: str | Path,
     *,
     split: str = "test",
+    source: str | None = None,
+    max_samples: int | None = None,
 ) -> dict[str, float]:
-    """Evaluate a checkpoint on train/val/test and return CER/WER metrics."""
+    """Evaluate a checkpoint on a manifest split and return CER/WER metrics.
+
+    ``source`` optionally restricts to one source (e.g. ``line``); defaults to
+    ``data.eval_source`` in the config, else all sources in the split.
+    """
     config = load_config(config_path)
-    root = project_root()
-    dataset_dir = Path(config["data"]["dataset_dir"])
-    if not dataset_dir.is_absolute():
-        dataset_dir = root / dataset_dir
     charset_path = Path(config["data"]["charset_path"])
     if not charset_path.is_absolute():
-        charset_path = root / charset_path
+        charset_path = project_root() / charset_path
 
     charset = Charset.from_file(charset_path)
-    samples = discover_samples(
-        dataset_dir,
-        images_subdir=config["data"].get("images_subdir", "data"),
-        labels_file=config["data"].get("labels_file", "labels.json"),
-    )
-    seed = int(config.get("project", {}).get("seed", 42))
-    train_s, val_s, test_s = train_val_test_split(
-        samples,
-        train_ratio=float(config["data"]["train_split"]),
-        val_ratio=float(config["data"]["val_split"]),
-        test_ratio=float(config["data"]["test_split"]),
-        seed=seed,
-    )
-    split_map = {"train": train_s, "val": val_s, "test": test_s}
-    if split not in split_map:
+    manifests = ensure_manifests(config)
+    if split not in manifests:
         raise ValueError(f"Unknown split={split}")
-    eval_samples = split_map[split]
+    records = load_manifest(manifests[split])
+
+    source = source or config["data"].get("eval_source")
+    if source:
+        records = [r for r in records if r["source"] == source]
+    if max_samples is not None and len(records) > max_samples:
+        import random
+
+        seed = int(config.get("project", {}).get("seed", 42))
+        records = random.Random(seed).sample(records, max_samples)
 
     model = build_crnn(config, num_classes=charset.num_classes)
     load_crnn_weights(model, checkpoint)
@@ -59,8 +57,9 @@ def evaluate(
     refs: list[str] = []
     hyps: list[str] = []
     ctc_cfg = config.get("ctc", {})
-    for path, text in eval_samples:
-        img = load_image(str(path))
+    for record in records:
+        text = record["text"]
+        img = load_image(str(resolve_image_path(config, record)))
         arr = preprocess(img, config["preprocess"])
         logits = model.predict(arr[None, ...], verbose=0)
         pred = decode_predictions(

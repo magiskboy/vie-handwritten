@@ -25,22 +25,36 @@ Tham khảo các hệ HTR tiếng Việt (Cinnamon / CRNN+CTC) và best practice
 4. **Linear (Dense)** — logits theo từng timestep, kích thước = `|charset| + blank`
 5. **CTC** — `tf.nn.ctc_loss` khi train; greedy / beam decode khi infer
 
-## Dữ liệu training
+## Dữ liệu training (HWDB — split chính thức theo người viết)
 
-Layout thực tế tại `data/vn_handwritten_images/` (~1838 mẫu địa chỉ viết tay):
+Layout tại `data/images/`, mỗi writer folder có 1 file `label.json` (`filename → text`):
 
 ```
-data/vn_handwritten_images/
-  labels.json              # {"1.jpg": "Số 3 Nguyễn Ngọc Vũ, Hà Nội", ...}
-  data/
-    1.jpg                  # key trong labels.json = tên file trong data/
-    0001_samples.png
-    ...
+data/images/
+  HWDB_line/{train_data,test_data}/<writer_id>/   # ảnh DÒNG chữ
+    1.jpg, 2.jpg, ...
+    label.json          # {"1.jpg": "văn bản dòng", ...}
+  HWDB_word/{train_data,test_data}/<writer_id>/   # ảnh TỪ đơn
+  HWDB_paragraph/...                              # ảnh nguyên trang (chưa dùng)
 ```
 
-- `labels.json`: object `filename → transcription` (UTF-8).
-- Ảnh: `.png` / `.jpg` / `.jpeg`, cùng thư mục `data/`.
-- Config trỏ tới bộ này qua `data.dataset_dir` trong `configs/default.yaml`.
+- `line` và `word` là cùng corpus ở 2 mức chi tiết → đều feed thẳng CRNN+CTC (~120k ảnh).
+- `paragraph` là ảnh đa dòng, **chưa dùng** để train CRNN.
+- Charset phủ ~100% nhãn (chỉ 1 ký tự OOV bị loại).
+
+### Chuẩn hoá thành manifest
+
+Sinh manifest JSONL chuẩn hoá (unify `label.json`, split theo writer, lọc OOV):
+
+```bash
+python main.py build-data --config configs/default.yaml
+# → data/manifests/{train,val,test}.jsonl + summary.json
+```
+
+- `test` = `test_data` chính thức; `val` = ~10% *writers* tách từ `train_data`
+  (writer-independent, không rò rỉ người viết); còn lại là `train`.
+- Cấu hình ở `data.*` trong `configs/default.yaml` (`sources`, `val_writers_ratio`,
+  `source_weights`, ...). Train tự build manifest nếu chưa có (`--rebuild-data` để build lại).
 
 ## Cấu trúc thư mục
 
@@ -58,7 +72,7 @@ src/vie_handwritten/
   postprocess.py  # decode → chuỗi tiếng Việt
   pipeline.py     # end-to-end infer
   metrics.py      # CER / WER
-scripts/          # train / evaluate / infer CLI
+main.py           # CLI: build-data / train / evaluate / infer
 notebooks/        # thí nghiệm
 checkpoints/      # weights
 tests/
@@ -74,13 +88,24 @@ uv sync
 pip install -e ".[dev]"
 ```
 
-## Scripts (skeleton — chưa implement)
+## Chạy
 
 ```bash
-python scripts/train.py --config configs/default.yaml
-python scripts/evaluate.py --config configs/default.yaml --checkpoint checkpoints/best.keras
-python scripts/infer.py --image path/to/line.png --checkpoint checkpoints/best.keras
+python main.py build-data --config configs/default.yaml            # sinh manifest
+python main.py train --config configs/default.yaml                 # train 2 pha A→B
+python main.py evaluate --checkpoint checkpoints/best.weights.h5 --split test --source line
+python main.py infer --image path/to/line.png --checkpoint checkpoints/best.weights.h5
 ```
+
+### Hai pha huấn luyện
+
+- **Pha A (warmup/head)** — đóng băng backbone ImageNet, chỉ train BiLSTM+Dense,
+  LR `1e-3`, nghiêng nguồn `word` (0.7/0.3) để học nhanh ánh xạ đặc trưng→ký tự.
+- **Pha B (finetune)** — mở băng từ `layer3` (giữ stem/layer1/layer2), LR `1e-4`,
+  nghiêng nguồn `line` (0.85/0.15) để chuyên hoá đọc dòng.
+
+Trọng số trộn nguồn đặt ở `train.phases[*].source_weights`; mỗi epoch chạy
+`train.steps_per_epoch` bước (dataset trộn nguồn lặp vô hạn).
 
 ## Trạng thái
 
