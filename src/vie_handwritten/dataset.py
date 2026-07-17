@@ -1,17 +1,23 @@
-"""Dataset discovery, manifest building, and the ``tf.data`` pipeline (line only).
+"""Dataset discovery, manifest building, and the ``tf.data`` pipeline.
 
 On-disk layout (HWDB, official split by writer)::
 
-    <root_dir>/                       # e.g. data/images
-      HWDB_line/
-        train_data/<writer_id>/
-          1.jpg, 2.jpg, ...
-          label.json                  # {"1.jpg": "văn bản dòng", ...}
-        test_data/<writer_id>/...
+    <dataset_dir>/                    # e.g. data/images/HWDB_line
+      train_data/<writer_id>/
+        1.jpg, 2.jpg, ...
+        label.json                    # {"1.jpg": "văn bản", ...}
+      test_data/<writer_id>/...
+
+``dataset_dir`` is the full path (from the project root) to the dataset,
+chosen via ``config['data']['dataset_dir']`` (default
+``data/images/HWDB_line``); switching it to ``data/images/HWDB_word`` etc.
+lets the same pipeline drive a curriculum such as word-first pretraining →
+line fine-tuning. ``root_dir`` stays the base that image paths are stored
+relative to inside the manifests.
 
 Split is writer-independent: ``test`` = official ``test_data``; ``val`` = a
 fraction of writers held out from ``train_data``. ``build-data`` writes
-normalized JSONL manifests to ``data/manifests/{train,val,test}.jsonl`` so
+normalized JSONL manifests to ``<manifest_dir>/{train,val,test}.jsonl`` so
 train/eval only ever read manifests, decoupled from the disk layout.
 """
 
@@ -32,7 +38,7 @@ from vie_handwritten.utils import abs_path
 
 logger = logging.getLogger(__name__)
 
-LINE_DIR = "HWDB_line"
+DEFAULT_DATASET_DIR = "data/images/HWDB_line"
 _IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff")
 
 
@@ -61,9 +67,13 @@ def _resolve_image(writer_dir: Path, name: str) -> Path | None:
     return None
 
 
-def discover(root_dir: Path, subdir: str) -> list[dict[str, str]]:
-    """Discover ``{image, text, writer}`` records for one HWDB_line split subdir."""
-    src_root = root_dir / LINE_DIR / subdir
+def discover(root_dir: Path, dataset_root: Path, subdir: str) -> list[dict[str, str]]:
+    """Discover ``{image, text, writer}`` records for one split subdir of ``dataset_root``.
+
+    ``dataset_root`` is the absolute dataset path (e.g. ``.../data/images/HWDB_line``);
+    image paths in the returned records are stored relative to ``root_dir``.
+    """
+    src_root = dataset_root / subdir
     records: list[dict[str, str]] = []
     if not src_root.is_dir():
         logger.warning("Source dir missing: %s", src_root)
@@ -88,7 +98,7 @@ def discover(root_dir: Path, subdir: str) -> list[dict[str, str]]:
 
 
 def build_manifests(config: dict[str, Any]) -> dict[str, Path]:
-    """Scan HWDB_line, split by writer, filter OOV, write JSONL manifests.
+    """Scan ``data.dataset_dir``, split by writer, filter OOV, write JSONL manifests.
 
     Returns ``{"train": path, "val": path, "test": path}``.
     """
@@ -105,8 +115,9 @@ def build_manifests(config: dict[str, Any]) -> dict[str, Path]:
     charset = Charset.from_file(abs_path(data_cfg["charset_path"]))
     vocab = set(charset.characters[1:])  # exclude blank at index 0
 
-    train_recs = discover(root_dir, data_cfg.get("train_subdir", "train_data"))
-    test_recs = discover(root_dir, data_cfg.get("test_subdir", "test_data"))
+    dataset_root = abs_path(data_cfg.get("dataset_dir", DEFAULT_DATASET_DIR))
+    train_recs = discover(root_dir, dataset_root, data_cfg.get("train_subdir", "train_data"))
+    test_recs = discover(root_dir, dataset_root, data_cfg.get("test_subdir", "test_data"))
 
     writers = sorted({r["writer"] for r in train_recs})
     random.Random(seed).shuffle(writers)
@@ -140,6 +151,7 @@ def build_manifests(config: dict[str, Any]) -> dict[str, Path]:
 
     summary = {
         "root_dir": str(root_dir),
+        "dataset_dir": str(dataset_root),
         "seed": seed,
         "drop_oov": drop_oov,
         "dropped_oov": dropped,

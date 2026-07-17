@@ -8,7 +8,8 @@ project:
 data:
   # HWDB_line layout (split chính thức theo người viết):
   #   data/images/HWDB_line/{train_data,test_data}/<writer>/label.json + *.jpg
-  root_dir: data/images
+  root_dir: data/images          # gốc để lưu đường dẫn ảnh tương đối trong manifest
+  dataset_dir: data/images/HWDB_line   # đường dẫn đầy đủ tới dataset (HWDB_line | HWDB_word | ...)
   manifest_dir: data/manifests   # → {train,val,test}.jsonl
   train_subdir: train_data
   test_subdir: test_data

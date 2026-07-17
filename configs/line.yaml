@@ -1,0 +1,83 @@
+# Curriculum stage 2 — FINE-TUNE trên HWDB_line, khởi tạo từ weights của stage word.
+# Đây là MÔ HÌNH CUỐI (đánh giá trên line test set). Dạy mô hình khoảng trắng giữa từ,
+# ngữ cảnh dòng và chuỗi dài. LR thấp + phase1 ngắn để tránh xoá kiến thức học từ word
+# (catastrophic forgetting).
+#
+# Chạy (SAU khi đã train xong stage word → có checkpoints/word/{model.weights.h5,config.yaml}):
+#   vie-ocr build-data --config configs/line.yaml
+#   vie-ocr train      --config configs/line.yaml --resume checkpoints/word
+# image → preprocess → ResNet18 → BiLSTM → Linear → CTC
+
+project:
+  name: vie-handwritten-line
+  seed: 42
+
+data:
+  root_dir: data/images
+  dataset_dir: data/images/HWDB_line
+  manifest_dir: data/manifests_line   # tách riêng khỏi manifest word
+  train_subdir: train_data
+  test_subdir: test_data
+  val_writers_ratio: 0.1
+  max_val_samples: 2000
+  drop_oov: true
+  charset_path: data/charset/vietnamese.txt
+
+# Preprocess giữ GIỐNG HỆT stage word (cùng phân phối ảnh cho backbone đã pretrain).
+preprocess:
+  target_height: 64
+  max_width: 1536
+  pad_value: 255
+  use_clahe: true
+  clahe_clip_limit: 2.0
+  clahe_tile_grid: [8, 8]
+  normalize: imagenet
+  channels: 3
+
+model:
+  pretrained: imagenet
+  bilstm_units: 256
+  bilstm_layers: 2
+  dropout: 0.2
+  width_downsample: 4
+
+ctc:
+  blank_index: 0
+  decode: greedy
+  beam_width: 10
+  lm_path: lm/vi.binary
+  lexicon_path: data/charset/vi_syllables.txt
+  unigrams_path: lm/unigrams.txt
+  alpha: 0.5
+  beta: 1.0
+  token_min_logp: -5.0
+  beam_prune_logp: -10.0
+
+postprocess:
+  underthesea: true
+  underthesea_tokenizer: regex
+  nfc: true
+  normalize_tone_marks: true
+
+train:
+  batch_size: 16
+  optimizer: adam
+  grad_clipnorm: 5.0
+  checkpoint_dir: checkpoints/line
+  report_dir: reports/line
+  log_dir: runs/line
+  early_stopping_patience: 10
+  reduce_lr_patience: 5
+  reduce_lr_factor: 0.5
+  decode_eval_samples: 128
+  decode_eval_every: 1
+  # Backbone + head đã được pretrain trên word → phase1 (đóng băng CNN) chỉ cần ngắn để
+  # head thích nghi với phân phối dòng; phase2 dùng LR thấp hơn default để fine-tune nhẹ nhàng.
+  phase1:
+    epochs: 3
+    learning_rate: 0.0001
+    max_train_samples: 2000
+  phase2:
+    epochs: 40
+    learning_rate: 0.00005
+    max_train_samples: null
