@@ -205,6 +205,8 @@ class DecodeMetrics(keras.callbacks.Callback):
             blank_index=int(config.get("ctc", {}).get("blank_index", 0)),
             nfc=bool(pp_cfg.get("nfc", True)),
             tone_marks=bool(pp_cfg.get("normalize_tone_marks", True)),
+            underthesea=bool(pp_cfg.get("underthesea", True)),
+            underthesea_tokenizer=str(pp_cfg.get("underthesea_tokenizer", "regex")),
         )
         self.ocr = OCRModel(crnn, charset, decoder)
         self.records = records

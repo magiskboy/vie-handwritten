@@ -5,7 +5,8 @@ Consolidates the whole "logits -> clean text" path in one place:
 * CTC decoders: greedy, beam search (TensorFlow), and LM-fused beam search
   (pyctcdecode + KenLM shallow fusion).
 * Deterministic Vietnamese normalization applied to the decoded string
-  (NFC, tone-mark placement, conservative whitespace/punctuation cleanup).
+  (Underthesea ``text_normalize`` by default: NFC, tone placement, composition
+  fixes; optional local fallback; conservative whitespace/punctuation cleanup).
 
 The :class:`CTCDecoder` bundles a decode method together with the text
 normalization so callers get a single ``logits -> list[str]`` step.
@@ -167,38 +168,44 @@ def decode_predictions(
 # --------------------------------------------------------------------------- #
 # Vietnamese text normalization
 # --------------------------------------------------------------------------- #
-# oa / oe / uy tone-placement: map "glide-then-toned-vowel" (o+á, u+ý, ...) to the
-# dictionary-standard "toned-glide-then-vowel" (ó+a, ú+y, ...). Applied via a
-# single regex alternation. The uy case is guarded against a preceding "q"
-# (in "quý" the u is part of "qu", so the tone already sits correctly on y).
+# Local fallback (used only when underthesea is disabled): map open-syllable
+# "glide-then-toned-vowel" (o+á, u+ý, ...) to "toned-glide-then-vowel"
+# (ó+a, ú+y, ...). ``(?!\w)`` keeps closed syllables like "soát" / "toàn"
+# untouched. The uy case is guarded against a preceding "q" ("quý").
 _TONE_MAP = {
-    # o + toned a  ->  toned o + a
     "oà": "òa", "oá": "óa", "oả": "ỏa", "oã": "õa", "oạ": "ọa",
     "Oà": "Òa", "Oá": "Óa", "Oả": "Ỏa", "Oã": "Õa", "Oạ": "Ọa",
-    # o + toned e  ->  toned o + e
     "oè": "òe", "oé": "óe", "oẻ": "ỏe", "oẽ": "õe", "oẹ": "ọe",
     "Oè": "Òe", "Oé": "Óe", "Oẻ": "Ỏe", "Oẽ": "Õe", "Oẹ": "Ọe",
-    # u + toned y  ->  toned u + y
     "uỳ": "ùy", "uý": "úy", "uỷ": "ủy", "uỹ": "ũy", "uỵ": "ụy",
     "Uỳ": "Ùy", "Uý": "Úy", "Uỷ": "Ủy", "Uỹ": "Ũy", "Uỵ": "Ụy",
 }
 _UY_KEYS = {"uỳ", "uý", "uỷ", "uỹ", "uỵ", "Uỳ", "Uý", "Uỷ", "Uỹ", "Uỵ"}
-_TONE_RE = re.compile("|".join(re.escape(k) for k in _TONE_MAP))
+_TONE_RE = re.compile(
+    "(?:" + "|".join(re.escape(k) for k in _TONE_MAP) + r")(?!\w)"
+)
 
 
 def normalize_tone_placement(text: str) -> str:
-    """Standardize tone-mark placement in oa / oe / uy clusters."""
+    """Local fallback: standardize tone marks on open oa / oe / uy clusters."""
 
     def _sub(m: re.Match[str]) -> str:
         key = m.group(0)
         if key in _UY_KEYS:
             start = m.start()
             prev = text[start - 1] if start > 0 else ""
-            if prev in ("q", "Q"):  # "quý": u is a glide after q, leave as-is
+            if prev in ("q", "Q"):
                 return key
         return _TONE_MAP[key]
 
     return _TONE_RE.sub(_sub, text)
+
+
+def _underthesea_normalize(text: str, *, tokenizer: str = "regex") -> str:
+    """Underthesea character/tone normalization (NFC, hoá→hóa, sóat→soát, …)."""
+    from underthesea import text_normalize
+
+    return text_normalize(text, tokenizer=tokenizer)
 
 
 def _fix_punct_spacing(text: str) -> str:
@@ -209,12 +216,27 @@ def _fix_punct_spacing(text: str) -> str:
     return text
 
 
-def normalize_vietnamese(text: str, *, nfc: bool = True, tone_marks: bool = True) -> str:
-    """Full Vietnamese normalization pipeline for a decoded line."""
-    if nfc:
-        text = unicodedata.normalize("NFC", text)
-    if tone_marks:
-        text = normalize_tone_placement(text)
+def normalize_vietnamese(
+    text: str,
+    *,
+    nfc: bool = True,
+    tone_marks: bool = True,
+    underthesea: bool = True,
+    underthesea_tokenizer: str = "regex",
+) -> str:
+    """Full Vietnamese normalization pipeline for a decoded line.
+
+    Prefer Underthesea ``text_normalize`` (covers NFC, open/closed tone placement,
+    Ð/Đ, vowel composition). Fall back to NFC + local open-syllable tone map when
+    ``underthesea=False``.
+    """
+    if underthesea:
+        text = _underthesea_normalize(text, tokenizer=underthesea_tokenizer)
+    else:
+        if nfc:
+            text = unicodedata.normalize("NFC", text)
+        if tone_marks:
+            text = normalize_tone_placement(text)
     text = _fix_punct_spacing(text)
     return re.sub(r"\s+", " ", text).strip()
 
@@ -226,6 +248,8 @@ def normalize_text(text: str, pp_cfg: dict[str, Any] | None = None) -> str:
         text,
         nfc=bool(pp_cfg.get("nfc", True)),
         tone_marks=bool(pp_cfg.get("normalize_tone_marks", True)),
+        underthesea=bool(pp_cfg.get("underthesea", True)),
+        underthesea_tokenizer=str(pp_cfg.get("underthesea_tokenizer", "regex")),
     )
 
 
@@ -251,6 +275,8 @@ class CTCDecoder:
         beam_prune_logp: float = -10.0,
         nfc: bool = True,
         tone_marks: bool = True,
+        underthesea: bool = True,
+        underthesea_tokenizer: str = "regex",
     ):
         self.charset = charset
         self.method = method
@@ -261,6 +287,8 @@ class CTCDecoder:
         self.beam_prune_logp = beam_prune_logp
         self.nfc = nfc
         self.tone_marks = tone_marks
+        self.underthesea = underthesea
+        self.underthesea_tokenizer = underthesea_tokenizer
 
     @classmethod
     def from_config(cls, charset: Any, config: dict[str, Any]) -> "CTCDecoder":
@@ -279,6 +307,8 @@ class CTCDecoder:
             beam_prune_logp=float(ctc_cfg.get("beam_prune_logp", -10.0)),
             nfc=bool(pp_cfg.get("nfc", True)),
             tone_marks=bool(pp_cfg.get("normalize_tone_marks", True)),
+            underthesea=bool(pp_cfg.get("underthesea", True)),
+            underthesea_tokenizer=str(pp_cfg.get("underthesea_tokenizer", "regex")),
         )
 
     def decode(self, logits: np.ndarray) -> list[str]:
@@ -293,4 +323,13 @@ class CTCDecoder:
             token_min_logp=self.token_min_logp,
             beam_prune_logp=self.beam_prune_logp,
         )
-        return [normalize_vietnamese(t, nfc=self.nfc, tone_marks=self.tone_marks) for t in raw]
+        return [
+            normalize_vietnamese(
+                t,
+                nfc=self.nfc,
+                tone_marks=self.tone_marks,
+                underthesea=self.underthesea,
+                underthesea_tokenizer=self.underthesea_tokenizer,
+            )
+            for t in raw
+        ]

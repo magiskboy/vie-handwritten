@@ -15,6 +15,7 @@ dependencies = [
     # Post-processing: LM-fused CTC beam search decoding.
     "pyctcdecode>=0.5.0",
     "kenlm",
+    "underthesea>=9.5.0",
 ]
 
 [project.optional-dependencies]

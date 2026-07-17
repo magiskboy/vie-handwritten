@@ -51,7 +51,7 @@ src/vie_handwritten/
   utils.py        # config I/O, seed, paths, GPU runtime
   charset.py      # bảng ký tự ↔ index
   preprocess.py   # OpenCV + scikit-image (ảnh → tensor)
-  postprocess.py  # CTC decode (greedy/beam/beam_lm) + chuẩn hoá tiếng Việt; lớp CTCDecoder
+  postprocess.py  # CTC decode + Underthesea/local chuẩn hoá tiếng Việt; lớp CTCDecoder
   dataset.py      # discovery + manifest + tf.data (line only)
   model.py        # ResNet-18 → BiLSTM → Linear + lớp composition OCRModel (net + postprocess)
   trainer.py      # CTC loss + OCRTrainer + DecodeMetrics + train 2 phase
@@ -138,8 +138,11 @@ Hai tầng post-process nâng độ chính xác của output, **không cần tra
 - **Bước 1 — beam search + KenLM language model** (`ctc.decode: beam_lm`): dùng
   `pyctcdecode` fuse một n-gram LM mức âm tiết + lexicon âm tiết tiếng Việt để ưu tiên
   chuỗi hợp lý về ngôn ngữ (sửa lỗi dấu thanh / ký tự gần giống).
-- **Bước 2 — chuẩn hoá văn bản** (`postprocess`): NFC, chuẩn hoá vị trí dấu thanh
-  (`hoà→hòa`, `thuý→thúy`), dọn khoảng trắng quanh dấu câu. Áp cho mọi decode method.
+- **Bước 2 — chuẩn hoá văn bản** (`postprocess`): mặc định dùng
+  [Underthesea](https://github.com/undertheseanlp/underthesea) `text_normalize`
+  (NFC, vị trí dấu thanh gồm âm tiết đóng `sóat→soát`, `hoà→hòa`, sửa `Ð/Đ` /
+  `lựơng→lượng`), rồi dọn khoảng trắng quanh dấu câu. Áp cho mọi decode method.
+  Tắt bằng `postprocess.underthesea: false` để dùng fallback local (chỉ âm tiết mở).
 
 ### 1. Cài công cụ build KenLM (qua package manager, KHÔNG dùng pip)
 

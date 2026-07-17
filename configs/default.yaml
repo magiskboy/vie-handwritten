@@ -49,8 +49,10 @@ ctc:
 
 # Post-process văn bản tiếng Việt sau khi decode (áp cho mọi decode method).
 postprocess:
-  nfc: true                      # chuẩn hoá Unicode NFC
-  normalize_tone_marks: true     # chuẩn hoá vị trí dấu thanh (oà→òa, thuý→thúy)
+  underthesea: true              # dùng underthesea.text_normalize (khuyến nghị)
+  underthesea_tokenizer: regex   # regex: nhanh, giữ dấu câu; underthesea: tách từ đầy đủ
+  nfc: true                      # fallback khi underthesea=false
+  normalize_tone_marks: true     # fallback local (chỉ âm tiết mở: oà→òa)
 
 train:
   batch_size: 16
