@@ -17,6 +17,7 @@ dependencies = [
     "kenlm",
     "underthesea>=9.5.0",
     "matplotlib>=3.11.0",
+    "scipy>=1.17.1",
 ]
 
 [project.optional-dependencies]

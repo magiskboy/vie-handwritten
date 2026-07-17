@@ -2644,6 +2644,8 @@ dependencies = [
     { name = "pyctcdecode" },
     { name = "pyyaml" },
     { name = "scikit-image" },
+    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
+    { name = "scipy", version = "1.18.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
     { name = "tensorflow", version = "2.19.1", source = { registry = "https://pypi.org/simple" }, extra = ["and-cuda"], marker = "sys_platform == 'darwin'" },
     { name = "tensorflow", version = "2.20.0", source = { registry = "https://pypi.org/simple" }, extra = ["and-cuda"], marker = "sys_platform != 'darwin'" },
     { name = "underthesea" },
@@ -2672,6 +2674,7 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6" },
     { name = "scikit-image", specifier = ">=0.24" },
+    { name = "scipy", specifier = ">=1.17.1" },
     { name = "tensorflow", extras = ["and-cuda"], specifier = ">=2.19.1" },
     { name = "underthesea", specifier = ">=9.5.0" },
 ]

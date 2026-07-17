@@ -1,14 +1,20 @@
-"""Main content: image preview + OCR prediction (+ optional GT compare)."""
+"""Main content: image preview + OCR prediction (+ optional GT compare).
+
+Supports two modes:
+    - Single-line: original flow (image + one prediction).
+    - Paragraph: segmented lines display with seam overlay toggle.
+"""
 
 from __future__ import annotations
 
+import tempfile
 from pathlib import Path
 from typing import Any
 
 import gi
 
 gi.require_version("Gtk", "4.0")
-from gi.repository import GObject, Gtk, Pango  # noqa: E402
+from gi.repository import GdkPixbuf, GLib, GObject, Gtk, Pango  # noqa: E402
 
 
 class ContentView(Gtk.Box):
@@ -247,3 +253,80 @@ class ContentView(Gtk.Box):
         if not self._prediction:
             return
         self.get_display().get_clipboard().set(self._prediction)
+
+    # ─── Paragraph mode ────────────────────────────────────────────────
+
+    def show_paragraph(
+        self,
+        image_path: str | Path,
+        seg_result: Any,
+        ocr_results: list[tuple[str, float]] | None = None,
+        overlay_image: "np.ndarray | None" = None,
+        *,
+        ground_truth: str | None = None,
+        comparison: dict[str, Any] | None = None,
+    ) -> None:
+        """Display paragraph segmentation results.
+
+        Args:
+            image_path: Original image path.
+            seg_result: SegmentationResult from segment_lines().
+            ocr_results: Optional list of (text, elapsed_ms) per line.
+            overlay_image: BGR image with seam lines drawn (from render_seam_overlay).
+            ground_truth: Optional GT text for comparison.
+            comparison: Optional pre-computed comparison dict.
+        """
+        p = Path(image_path)
+        self._current_path = str(p)
+        self._ground_truth = ground_truth
+        self._filename.set_label(f"\U0001f4c4 {p.name} \u2014 {seg_result.n_lines} d\u00f2ng")
+        self._filename.set_tooltip_text(str(p))
+
+        if overlay_image is not None:
+            self._set_picture_from_array(overlay_image)
+        else:
+            self._picture.set_filename(str(p))
+
+        self._image_stack.set_visible_child_name("image")
+        self._rerun_btn.set_sensitive(True)
+
+        if ocr_results:
+            lines_text = [text for text, _ in ocr_results]
+            combined = "\n".join(lines_text)
+            total_ms = sum(ms for _, ms in ocr_results)
+            self._prediction = combined
+            self._text.set_label(combined if combined.strip() else "(trống)")
+            self._copy_btn.set_sensitive(bool(combined.strip()))
+            self.set_latency(total_ms)
+            self._apply_comparison(comparison)
+        else:
+            self._prediction = ""
+            self._text.set_label(f"Đã phân tách {seg_result.n_lines} dòng. Load model để OCR.")
+            self._copy_btn.set_sensitive(False)
+            self.set_latency(None)
+            if ground_truth is not None:
+                self._gt_text.set_label(ground_truth)
+                self._compare.set_visible(True)
+                self._metrics.set_label("Chưa có prediction để so sánh.")
+            else:
+                self._compare.set_visible(False)
+
+    def show_paragraph_with_seams(self, image_path: str | Path, seg_result: Any) -> None:
+        """Update display to show/hide seam overlay."""
+        from gui.segment_service import render_seam_overlay
+
+        overlay = render_seam_overlay(image_path, seg_result)
+        self._set_picture_from_array(overlay)
+
+    def show_paragraph_without_seams(self, image_path: str | Path) -> None:
+        """Revert to original image (no seam overlay)."""
+        self._picture.set_filename(str(image_path))
+
+    def _set_picture_from_array(self, bgr_image: "np.ndarray") -> None:
+        """Set Gtk.Picture from a BGR numpy array via temporary file."""
+        import cv2
+
+        tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+        cv2.imwrite(tmp.name, bgr_image)
+        self._picture.set_filename(tmp.name)
+        self._image_stack.set_visible_child_name("image")

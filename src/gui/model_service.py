@@ -236,6 +236,28 @@ class ModelService:
         elapsed_ms = (time.perf_counter() - t0) * 1000.0
         return text, elapsed_ms
 
+    def recognize_lines(self, line_images: list["np.ndarray"]) -> list[tuple[str, float]]:
+        """Run OCR on multiple pre-segmented line images (blocking).
+
+        Each line_image should be a grayscale ndarray (dark text on white bg).
+        Use SegmentationResult.lines_gray for best results.
+        Returns list of ``(text, elapsed_ms)`` per line.
+        """
+        with self._lock:
+            model = self._model
+        if model is None:
+            raise RuntimeError("Model is not loaded")
+
+        pp_config = model.config["preprocess"]
+        results: list[tuple[str, float]] = []
+        for img in line_images:
+            t0 = time.perf_counter()
+            arr = preprocess(img, pp_config)
+            text = model.recognize(arr)
+            elapsed_ms = (time.perf_counter() - t0) * 1000.0
+            results.append((text, elapsed_ms))
+        return results
+
     def load_async(
         self,
         checkpoint: str | Path,

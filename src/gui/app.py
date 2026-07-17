@@ -21,6 +21,7 @@ from gui.model_service import (  # noqa: E402
     load_folder_labels,
     lookup_label,
 )
+from gui.segment_service import SegmentService, is_multiline, render_seam_overlay  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -49,9 +50,12 @@ class MainWindow(Adw.ApplicationWindow):
         self.set_default_size(1120, 740)
 
         self.service = ModelService()
+        self.seg_service = SegmentService()
         self._cache: dict[str, tuple[str, float]] = {}
         self._labels: dict[str, str] = {}
         self._current_image: str | None = None
+        self._current_seg_result = None  # SegmentationResult for current paragraph
+        self._seam_visible = False
         self._toast_overlay = Adw.ToastOverlay()
 
         self._image_list = ImageList()
@@ -87,6 +91,13 @@ class MainWindow(Adw.ApplicationWindow):
         load_folder_btn = Gtk.Button(label="Load Images")
         load_folder_btn.connect("clicked", self._on_load_folder)
         header.pack_start(load_folder_btn)
+
+        self._seam_btn = Gtk.ToggleButton(label="Seams")
+        self._seam_btn.set_icon_name("view-grid-symbolic")
+        self._seam_btn.set_tooltip_text("Hiện/ẩn đường phân tách dòng (seam carving)")
+        self._seam_btn.set_sensitive(False)
+        self._seam_btn.connect("toggled", self._on_seam_toggled)
+        header.pack_end(self._seam_btn)
 
         toolbar.add_top_bar(header)
         toolbar.set_content(split)
@@ -190,24 +201,37 @@ class MainWindow(Adw.ApplicationWindow):
 
     def _on_image_selected(self, _list: ImageList, path: str) -> None:
         self._current_image = path
-        self._content.show_image(path, ground_truth=self._gt_for(path))
-        if path in self._cache:
-            text, elapsed_ms = self._cache[path]
-            self._content.set_prediction(
-                text,
-                elapsed_ms=elapsed_ms,
-                comparison=self._comparison_for(path, text),
-            )
-            return
-        if not self.service.ready:
-            self._content.set_message("Hãy load model trước.")
-            return
-        self._recognize(path)
+        self._current_seg_result = None
+        self._seam_visible = False
+        self._seam_btn.set_active(False)
+        self._seam_btn.set_sensitive(False)
+
+        # Auto-detect: multi-line paragraph?
+        if is_multiline(path):
+            self._run_paragraph_flow(path)
+        else:
+            self._content.show_image(path, ground_truth=self._gt_for(path))
+            if path in self._cache:
+                text, elapsed_ms = self._cache[path]
+                self._content.set_prediction(
+                    text,
+                    elapsed_ms=elapsed_ms,
+                    comparison=self._comparison_for(path, text),
+                )
+                return
+            if not self.service.ready:
+                self._content.set_message("Hãy load model trước.")
+                return
+            self._recognize(path)
 
     def _on_rerun(self, _view: ContentView) -> None:
         if self._current_image:
             self._cache.pop(self._current_image, None)
-            self._recognize(self._current_image)
+            self._current_seg_result = None
+            if is_multiline(self._current_image):
+                self._run_paragraph_flow(self._current_image)
+            else:
+                self._recognize(self._current_image)
 
     def _recognize(self, path: str) -> None:
         if not self.service.ready:
@@ -244,6 +268,107 @@ class MainWindow(Adw.ApplicationWindow):
         if not self.service.recognize_async(path, _done):
             self._content.set_busy(False)
             self.toast("Đang bận, thử lại sau")
+
+
+    def _run_paragraph_flow(self, path: str) -> None:
+        """Segment image into lines, then OCR each line."""
+        self._content.set_busy(True)
+        self._content.set_message("Đang phân tách dòng…")
+        self._info.set_status("Đang phân tách…")
+
+        def _on_segment_done(seg_result, elapsed_ms, err) -> None:
+            def _ui() -> bool:
+                if err is not None:
+                    self._content.set_busy(False)
+                    self._content.set_message(f"Lỗi phân tách: {err}")
+                    self._info.set_status("Lỗi phân tách")
+                    self.toast(f"Segment lỗi: {err}")
+                    logger.exception("segment failed", exc_info=err)
+                    return False
+
+                self._current_seg_result = seg_result
+                self._seam_btn.set_sensitive(bool(seg_result.seams))
+
+                if self.service.ready:
+                    self._recognize_paragraph(path, seg_result)
+                else:
+                    self._content.set_busy(False)
+                    self._content.show_paragraph(
+                        path, seg_result, ground_truth=self._gt_for(path)
+                    )
+                    self._info.set_status("Sẵn sàng")
+                    self.toast(f"Phân tách {seg_result.n_lines} dòng. Load model để OCR.")
+                return False
+
+            GLib.idle_add(_ui)
+
+        if not self.seg_service.segment_async(path, _on_segment_done):
+            self._content.set_busy(False)
+            self.toast("Đang bận, thử lại sau")
+
+    def _recognize_paragraph(self, path: str, seg_result) -> None:
+        """OCR all segmented lines in a background thread."""
+        self._content.set_message("Đang nhận dạng từng dòng…")
+        self._info.set_status("Đang nhận dạng…")
+
+        import threading
+
+        def _run() -> None:
+            ocr_results = None
+            err = None
+            try:
+                ocr_results = self.service.recognize_lines(seg_result.lines_gray)
+            except BaseException as exc:  # noqa: BLE001
+                err = exc
+            finally:
+                self.service._busy = False
+
+            def _ui() -> bool:
+                self._content.set_busy(False)
+                if err is not None:
+                    self._content.set_message(f"Lỗi OCR: {err}")
+                    self._info.set_status("Lỗi OCR")
+                    self.toast(f"OCR lỗi: {err}")
+                    return False
+
+                # Cache combined text
+                combined = "\n".join(text for text, _ in ocr_results)
+                total_ms = sum(ms for _, ms in ocr_results)
+                self._cache[path] = (combined, total_ms)
+                self._image_list.mark_recognized(path, recognized=True)
+
+                # Show with seam overlay if toggled
+                overlay = None
+                if self._seam_visible and seg_result.seams:
+                    overlay = render_seam_overlay(path, seg_result)
+
+                self._content.show_paragraph(
+                    path,
+                    seg_result,
+                    ocr_results=ocr_results,
+                    overlay_image=overlay,
+                    ground_truth=self._gt_for(path),
+                    comparison=self._comparison_for(path, combined),
+                )
+                self._info.set_status("Sẵn sàng")
+                return False
+
+            GLib.idle_add(_ui)
+
+        self.service._busy = True
+        threading.Thread(target=_run, name="ocr-paragraph", daemon=True).start()
+
+    def _on_seam_toggled(self, btn: Gtk.ToggleButton) -> None:
+        """Toggle seam line visibility on the paragraph image."""
+        self._seam_visible = btn.get_active()
+        if self._current_image is None or self._current_seg_result is None:
+            return
+        if self._seam_visible:
+            self._content.show_paragraph_with_seams(
+                self._current_image, self._current_seg_result
+            )
+        else:
+            self._content.show_paragraph_without_seams(self._current_image)
 
 
 class OCRApplication(Adw.Application):
