@@ -7,9 +7,11 @@ CKPT       ?= checkpoints
 SPLIT      ?= test
 TUNE_SPLIT ?= val
 CLI        := uv run python -m vie_handwritten.cli
+OVCLI      := uv run python -m converter.cli
 KENLM_DIR  := third_party/kenlm
+OVDIR      ?= $(CKPT)/openvino
 
-.PHONY: help sync sync-gui build-kenlm build-data build-lm train train-word train-line curriculum evaluate infer tune-lm gui clean-lm
+.PHONY: help sync sync-gui sync-ov build-kenlm build-data build-lm train train-word train-line curriculum evaluate infer tune-lm gui clean-lm convert-ov bench-ov-acc bench-ov-perf
 
 help:
 	@echo "Targets (override vars like CKPT=, IMAGE=, SPLIT=, DECODE=, MAX=):"
@@ -26,6 +28,9 @@ help:
 	@echo "  infer        OCR one image (IMAGE=, CKPT=dir, DECODE=)"
 	@echo "  tune-lm      Grid-search KenLM alpha/beta on val (CKPT=dir, MAX=, ALPHAS=, BETAS=)"
 	@echo "  gui          Launch GTK4 OCR viewer (vie-ocr-gui)"
+	@echo "  convert-ov   Convert checkpoint -> OpenVINO FP16+INT8 IR (CKPT=dir)"
+	@echo "  bench-ov-acc CER/WER: OV variants vs Keras (CKPT=dir, OVDIR=, SPLIT=)"
+	@echo "  bench-ov-perf CPU latency/throughput per precision x batch (CKPT=dir, OVDIR=)"
 	@echo "  clean-lm     Remove generated LM artifacts (lm/)"
 
 sync:
@@ -33,6 +38,9 @@ sync:
 
 sync-gui:
 	uv sync --extra gui
+
+sync-ov:
+	uv sync --extra openvino
 
 gui:
 	uv run vie-ocr-gui
@@ -78,6 +86,17 @@ infer:
 
 tune-lm:
 	$(CLI) tune-lm --checkpoint $(CKPT) --split $(TUNE_SPLIT) $(if $(MAX),--max-samples $(MAX),) $(if $(ALPHAS),--alphas $(ALPHAS),) $(if $(BETAS),--betas $(BETAS),)
+
+# OpenVINO convert + benchmarks. CKPT is the checkpoint dir; OVDIR defaults to
+# $(CKPT)/openvino. Needs the openvino extra (make sync-ov).
+convert-ov:
+	$(OVCLI) convert --checkpoint $(CKPT) $(if $(OVCONFIG),--config $(OVCONFIG),) $(if $(BATCHES),--batches $(BATCHES),)
+
+bench-ov-acc:
+	$(OVCLI) bench-accuracy --ov-dir $(OVDIR) --checkpoint $(CKPT) $(if $(SPLIT),--split $(SPLIT),) $(if $(MAX),--max-samples $(MAX),) $(if $(PRECISIONS),--precisions $(PRECISIONS),) $(if $(JSON),--json $(JSON),)
+
+bench-ov-perf:
+	$(OVCLI) bench-perf --ov-dir $(OVDIR) --checkpoint $(CKPT) $(if $(PRECISIONS),--precisions $(PRECISIONS),) $(if $(BATCHES),--batches $(BATCHES),) $(if $(JSON),--json $(JSON),)
 
 clean-lm:
 	rm -rf lm/

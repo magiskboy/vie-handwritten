@@ -1,0 +1,14 @@
+openvino:
+  batches: [1, 16]
+  # height/width default = checkpoint preprocess.target_height / max_width
+  calib_split: val
+  calib_samples: 300
+  subset_size: 300
+  precision_out: [fp16, int8]
+  max_cer_drop: 0.01
+bench:
+  split: val
+  max_samples: 500
+  warmup: 20
+  iters: 100
+  decode: greedy

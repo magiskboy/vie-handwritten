@@ -28,6 +28,12 @@ dev = [
 gui = [
     "pygobject>=3.50",
 ]
+# CPU deploy: convert Keras → OpenVINO IR + INT8 quantize.
+# Inference (runtime.py) needs only ``openvino``; ``nncf`` is required to convert.
+openvino = [
+    "openvino>=2025.0",
+    "nncf>=2.14",
+]
 
 # kenlm has no PyPI wheel; build the query bindings from the vendored submodule.
 [tool.uv.sources]
@@ -46,13 +52,14 @@ override-dependencies = ["numpy>=2.1.0"]
 [project.scripts]
 vie-ocr = "vie_handwritten.cli:main"
 vie-ocr-gui = "gui.app:main"
+vie-ov = "converter.cli:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/vie_handwritten", "src/gui"]
+packages = ["src/vie_handwritten", "src/gui", "src/converter"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "src/gui/style.css" = "gui/style.css"
