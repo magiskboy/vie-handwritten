@@ -101,7 +101,11 @@ class MainWindow(Adw.ApplicationWindow):
         self._toast_overlay.add_toast(Adw.Toast(title=message, timeout=3))
 
     def _on_load_model(self, _btn: Gtk.Button) -> None:
-        dialog = Gtk.FileDialog(title="Chọn thư mục checkpoint (model.weights.h5 + config.yaml)")
+        dialog = Gtk.FileDialog(
+            title="Chọn thư mục checkpoint (model.weights.h5 + config.yaml)",
+            initial_folder=Gio.File.new_for_path(GLib.get_current_dir())
+        )
+   
         dialog.select_folder(self, None, self._on_model_chosen)
 
     def _on_model_chosen(self, dialog: Gtk.FileDialog, result: Gio.AsyncResult) -> None:
@@ -146,7 +150,7 @@ class MainWindow(Adw.ApplicationWindow):
             self.toast("Đang bận, thử lại sau")
 
     def _on_load_folder(self, _btn: Gtk.Button) -> None:
-        dialog = Gtk.FileDialog(title="Chọn thư mục ảnh")
+        dialog = Gtk.FileDialog(title="Chọn thư mục ảnh", initial_folder=Gio.File.new_for_path(GLib.get_current_dir()))
         dialog.select_folder(self, None, self._on_folder_chosen)
 
     def _on_folder_chosen(self, dialog: Gtk.FileDialog, result: Gio.AsyncResult) -> None:

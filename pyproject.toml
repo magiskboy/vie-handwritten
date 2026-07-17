@@ -16,6 +16,7 @@ dependencies = [
     "pyctcdecode>=0.5.0",
     "kenlm",
     "underthesea>=9.5.0",
+    "matplotlib>=3.11.0",
 ]
 
 [project.optional-dependencies]
@@ -30,6 +31,11 @@ gui = [
 # kenlm has no PyPI wheel; build the query bindings from the vendored submodule.
 [tool.uv.sources]
 kenlm = { path = "third_party/kenlm" }
+
+[tool.uv.workspace]
+members = [
+    "demo",
+]
 
 # pyctcdecode 0.5.0 declares numpy<2.0, but TensorFlow 2.19 needs numpy>=2.1.
 # pyctcdecode only uses basic numpy ops and works fine on numpy 2.x, so relax it.
