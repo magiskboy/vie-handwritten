@@ -1,7 +1,7 @@
 """OCR model loading + inference for the GTK GUI (no GI imports).
 
-Resolves config/charset automatically from ``vie_handwritten`` defaults and
-prefers ``beam_lm`` decoding when KenLM artifacts are present.
+Loads a checkpoint directory ``{model.weights.h5, config.yaml}`` and prefers
+``beam_lm`` decoding when KenLM artifacts are present.
 """
 
 from __future__ import annotations
@@ -19,13 +19,20 @@ import editdistance
 from vie_handwritten.eval import character_error_rate, word_error_rate
 from vie_handwritten.model import OCRModel
 from vie_handwritten.preprocess import load_image, preprocess
-from vie_handwritten.utils import abs_path, configure_runtime, load_config, project_root
+from vie_handwritten.utils import (
+    CHECKPOINT_CONFIG_NAME,
+    WEIGHTS_NAME,
+    abs_path,
+    configure_runtime,
+    load_checkpoint_config,
+    project_root,
+    resolve_checkpoint_dir,
+)
 
 logger = logging.getLogger(__name__)
 
 IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff")
 
-_DEFAULT_CONFIG = "configs/default.yaml"
 _LM_PATH = "lm/vi.binary"
 _UNIGRAMS_PATH = "lm/unigrams.txt"
 _LEXICON_PATH = "data/charset/vi_syllables.txt"
@@ -99,15 +106,6 @@ def compare_prediction(reference: str, hypothesis: str) -> dict[str, Any]:
     }
 
 
-def resolve_config_path(weights_path: str | Path) -> Path:
-    """Prefer ``config_used.yaml`` next to the checkpoint, else default config."""
-    weights = Path(weights_path)
-    sibling = weights.parent / "config_used.yaml"
-    if sibling.is_file():
-        return sibling
-    return abs_path(_DEFAULT_CONFIG)
-
-
 def _prepare_config(config: dict[str, Any]) -> tuple[dict[str, Any], str]:
     """Force ``beam_lm`` when LM files exist; otherwise fall back to ``greedy``.
 
@@ -160,8 +158,7 @@ class ModelService:
         self._lock = threading.Lock()
         self._model: OCRModel | None = None
         self._config: dict[str, Any] | None = None
-        self._weights_path: Path | None = None
-        self._config_path: Path | None = None
+        self._checkpoint_dir: Path | None = None
         self._decode_note: str = ""
         self._runtime: dict[str, Any] = {}
         self._busy = False
@@ -182,10 +179,12 @@ class ModelService:
         charset_n = None
         if self._model is not None:
             charset_n = self._model.charset.num_classes
+        ckpt = self._checkpoint_dir
         return {
             "ready": self.ready,
-            "weights": str(self._weights_path) if self._weights_path else "",
-            "config": str(self._config_path) if self._config_path else "",
+            "weights": str(ckpt / WEIGHTS_NAME) if ckpt else "",
+            "config": str(ckpt / CHECKPOINT_CONFIG_NAME) if ckpt else "",
+            "checkpoint": str(ckpt) if ckpt else "",
             "decode": ctc.get("decode", ""),
             "decode_note": self._decode_note,
             "beam_width": ctc.get("beam_width", ""),
@@ -198,34 +197,28 @@ class ModelService:
             "project_root": str(project_root()),
         }
 
-    def load(self, weights_path: str | Path) -> dict[str, Any]:
-        """Load checkpoint (blocking). Prefer calling from a worker thread."""
-        weights = Path(weights_path)
-        if not weights.is_file():
-            raise FileNotFoundError(f"Checkpoint not found: {weights}")
-
-        config_path = resolve_config_path(weights)
-        config = load_config(config_path)
-        config, note = _prepare_config(config)
+    def load(self, checkpoint: str | Path) -> dict[str, Any]:
+        """Load a checkpoint directory (blocking). Prefer calling from a worker thread."""
+        root = resolve_checkpoint_dir(checkpoint)
+        config, note = _prepare_config(load_checkpoint_config(root))
 
         self._runtime = configure_runtime()
         self._runtime["gpu_names"] = _gpu_display_names()
         try:
-            model = OCRModel.from_checkpoint(config, weights)
+            model = OCRModel.from_checkpoint(root, config=config)
         except Exception as exc:  # noqa: BLE001
             if config.get("ctc", {}).get("decode") == "beam_lm":
                 logger.warning("beam_lm failed (%s); retrying with greedy", exc)
                 config["ctc"]["decode"] = "greedy"
                 note = f"beam_lm failed ({exc}); using greedy decode"
-                model = OCRModel.from_checkpoint(config, weights)
+                model = OCRModel.from_checkpoint(root, config=config)
             else:
                 raise
 
         with self._lock:
             self._model = model
-            self._config = config
-            self._weights_path = weights
-            self._config_path = config_path
+            self._config = model.config
+            self._checkpoint_dir = root
             self._decode_note = note
         return self.info()
 
@@ -233,20 +226,19 @@ class ModelService:
         """Run OCR on one image (blocking). Returns ``(text, elapsed_ms)``."""
         with self._lock:
             model = self._model
-            config = self._config
-        if model is None or config is None:
+        if model is None:
             raise RuntimeError("Model is not loaded")
 
         path = Path(image_path)
         t0 = time.perf_counter()
-        arr = preprocess(load_image(str(path)), config["preprocess"])
+        arr = preprocess(load_image(str(path)), model.config["preprocess"])
         text = model.recognize(arr)
         elapsed_ms = (time.perf_counter() - t0) * 1000.0
         return text, elapsed_ms
 
     def load_async(
         self,
-        weights_path: str | Path,
+        checkpoint: str | Path,
         on_done: Callable[[dict[str, Any] | None, BaseException | None], None],
     ) -> bool:
         """Start a background load. Returns False if already busy."""
@@ -258,7 +250,7 @@ class ModelService:
             info: dict[str, Any] | None = None
             err: BaseException | None = None
             try:
-                info = self.load(weights_path)
+                info = self.load(checkpoint)
             except BaseException as exc:  # noqa: BLE001
                 err = exc
             finally:

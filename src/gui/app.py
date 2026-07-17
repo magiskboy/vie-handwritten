@@ -101,29 +101,20 @@ class MainWindow(Adw.ApplicationWindow):
         self._toast_overlay.add_toast(Adw.Toast(title=message, timeout=3))
 
     def _on_load_model(self, _btn: Gtk.Button) -> None:
-        dialog = Gtk.FileDialog(title="Chọn checkpoint (.weights.h5)")
-        filters = Gio.ListStore.new(Gtk.FileFilter)
-        filt = Gtk.FileFilter(name="Keras weights (*.h5)")
-        filt.add_pattern("*.h5")
-        filt.add_pattern("*.weights.h5")
-        filters.append(filt)
-        all_f = Gtk.FileFilter(name="All files")
-        all_f.add_pattern("*")
-        filters.append(all_f)
-        dialog.set_filters(filters)
-        dialog.open(self, None, self._on_model_chosen)
+        dialog = Gtk.FileDialog(title="Chọn thư mục checkpoint (model.weights.h5 + config.yaml)")
+        dialog.select_folder(self, None, self._on_model_chosen)
 
     def _on_model_chosen(self, dialog: Gtk.FileDialog, result: Gio.AsyncResult) -> None:
         try:
-            file = dialog.open_finish(result)
+            folder = dialog.select_folder_finish(result)
         except GLib.Error as exc:
             if exc.matches(Gio.io_error_quark(), Gio.IOErrorEnum.CANCELLED):
                 return
-            self.toast(f"Không mở được file: {exc.message}")
+            self.toast(f"Không mở được thư mục: {exc.message}")
             return
-        if file is None:
+        if folder is None:
             return
-        path = file.get_path()
+        path = folder.get_path()
         if not path:
             self.toast("Đường dẫn checkpoint không hợp lệ")
             return

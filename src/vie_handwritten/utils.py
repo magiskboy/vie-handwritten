@@ -15,6 +15,13 @@ logger = logging.getLogger(__name__)
 
 _RUNTIME_CONFIGURED = False
 
+# Standard checkpoint directory layout (written by train, read by infer/eval/GUI):
+#   <checkpoint>/
+#     model.weights.h5   # Keras 3 requires the ``.weights.h5`` suffix
+#     config.yaml        # copy of the train config used to build the model
+WEIGHTS_NAME = "model.weights.h5"
+CHECKPOINT_CONFIG_NAME = "config.yaml"
+
 
 def load_config(path: str | Path) -> dict[str, Any]:
     """Load a YAML config file into a nested dict."""
@@ -32,6 +39,40 @@ def save_config(config: dict[str, Any], path: str | Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as f:
         yaml.safe_dump(config, f, allow_unicode=True, sort_keys=False)
+
+
+def resolve_checkpoint_dir(checkpoint: str | Path) -> Path:
+    """Validate a checkpoint directory containing ``model.weights.h5`` + ``config.yaml``."""
+    root = Path(checkpoint)
+    if not root.is_dir():
+        raise FileNotFoundError(f"Checkpoint must be a directory: {checkpoint}")
+    missing = [
+        name
+        for name in (WEIGHTS_NAME, CHECKPOINT_CONFIG_NAME)
+        if not (root / name).is_file()
+    ]
+    if missing:
+        raise FileNotFoundError(
+            f"Checkpoint {root} is incomplete; missing: {', '.join(missing)}"
+        )
+    return root.resolve()
+
+
+def checkpoint_weights_path(checkpoint: str | Path) -> Path:
+    """Absolute path to ``model.weights.h5`` inside a checkpoint directory."""
+    return resolve_checkpoint_dir(checkpoint) / WEIGHTS_NAME
+
+
+def load_checkpoint_config(checkpoint: str | Path) -> dict[str, Any]:
+    """Load ``config.yaml`` from a checkpoint directory."""
+    return load_config(resolve_checkpoint_dir(checkpoint) / CHECKPOINT_CONFIG_NAME)
+
+
+def save_checkpoint_config(config: dict[str, Any], checkpoint_dir: str | Path) -> Path:
+    """Copy the train config into ``checkpoint_dir/config.yaml``."""
+    path = Path(checkpoint_dir) / CHECKPOINT_CONFIG_NAME
+    save_config(config, path)
+    return path
 
 
 def set_seed(seed: int) -> None:

@@ -22,7 +22,12 @@ from tensorflow.keras import layers
 
 from vie_handwritten.charset import Charset
 from vie_handwritten.postprocess import CTCDecoder
-from vie_handwritten.utils import charset_path
+from vie_handwritten.utils import (
+    WEIGHTS_NAME,
+    charset_path,
+    load_checkpoint_config,
+    resolve_checkpoint_dir,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -203,14 +208,9 @@ def set_backbone_trainable(model: keras.Model, trainable: bool) -> None:
     logger.info("Backbone %s", "trainable" if trainable else "frozen")
 
 
-def load_crnn_weights(model: keras.Model, checkpoint: str | Path) -> None:
+def load_crnn_weights(model: keras.Model, weights_path: str | Path) -> None:
     """Load CRNN weights from a ``*.weights.h5`` file."""
-    ckpt = Path(checkpoint)
-    for path in (ckpt, ckpt.with_suffix(".weights.h5")):
-        if path.is_file():
-            model.load_weights(str(path))
-            return
-    model.load_weights(str(ckpt))
+    model.load_weights(str(weights_path))
 
 
 class OCRModel:
@@ -219,22 +219,44 @@ class OCRModel:
     Wraps the CRNN (produces CTC logits) together with a :class:`CTCDecoder`
     (logits -> clean Vietnamese text), exposing a single ``recognize`` step so
     callers never have to wire the net, charset and decoder together by hand.
-    Images passed in are expected to be already preprocessed (see ``preprocess``).
+    Images passed in are expected to be already preprocessed (see ``preprocess``);
+    the train-time preprocess settings live on ``self.config["preprocess"]``.
     """
 
-    def __init__(self, net: keras.Model, charset: Charset, decoder: CTCDecoder):
+    def __init__(
+        self,
+        net: keras.Model,
+        charset: Charset,
+        decoder: CTCDecoder,
+        config: dict[str, Any] | None = None,
+    ):
         self.net = net
         self.charset = charset
         self.decoder = decoder
+        self.config = config or {}
 
     @classmethod
-    def from_checkpoint(cls, config: dict[str, Any], checkpoint: str | Path) -> "OCRModel":
-        """Build net + decoder from config and load weights from ``checkpoint``."""
-        charset = Charset.from_file(charset_path(config))
-        net = build_crnn(config, num_classes=charset.num_classes)
-        load_crnn_weights(net, checkpoint)
-        decoder = CTCDecoder.from_config(charset, config)
-        return cls(net, charset, decoder)
+    def from_checkpoint(
+        cls,
+        checkpoint: str | Path,
+        *,
+        config: dict[str, Any] | None = None,
+        decode: str | None = None,
+    ) -> "OCRModel":
+        """Load from a checkpoint directory ``{model.weights.h5, config.yaml}``.
+
+        ``config`` is the already-loaded checkpoint config (optional); ``decode``
+        overrides ``ctc.decode`` at runtime.
+        """
+        root = resolve_checkpoint_dir(checkpoint)
+        cfg = dict(config) if config is not None else load_checkpoint_config(root)
+        if decode is not None:
+            cfg = {**cfg, "ctc": {**cfg.get("ctc", {}), "decode": decode}}
+        charset = Charset.from_file(charset_path(cfg))
+        net = build_crnn(cfg, num_classes=charset.num_classes)
+        load_crnn_weights(net, root / WEIGHTS_NAME)
+        decoder = CTCDecoder.from_config(charset, cfg)
+        return cls(net, charset, decoder, config=cfg)
 
     def predict_logits(self, images: np.ndarray) -> np.ndarray:
         """Forward pass: batched preprocessed images ``(B, H, W, C)`` -> logits."""

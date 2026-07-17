@@ -1,9 +1,9 @@
 # Vietnamese handwritten OCR - common tasks.
 # Override variables on the command line, e.g.:
-#   make evaluate CKPT=checkpoints/best.weights.h5 SPLIT=test DECODE=beam_lm
+#   make evaluate CKPT=checkpoints SPLIT=test DECODE=beam_lm
 
 CONFIG     ?= configs/default.yaml
-CKPT       ?= checkpoints/best.weights.h5
+CKPT       ?= checkpoints
 SPLIT      ?= test
 TUNE_SPLIT ?= val
 CLI        := uv run python -m vie_handwritten.cli
@@ -18,10 +18,10 @@ help:
 	@echo "  build-kenlm  Build KenLM lmplz/build_binary from submodule (needs cmake + boost-devel)"
 	@echo "  build-data   Build normalized JSONL manifests"
 	@echo "  build-lm     Train KenLM syllable LM from train split (ORDER=, PRUNE=)"
-	@echo "  train        Train CRNN, 2 phases (RESUME=)"
-	@echo "  evaluate     CER/WER on a split (CKPT=, SPLIT=, DECODE=, MAX=)"
-	@echo "  infer        OCR one image (IMAGE=, CKPT=, DECODE=)"
-	@echo "  tune-lm      Grid-search KenLM alpha/beta on val (CKPT=, MAX=, ALPHAS=, BETAS=)"
+	@echo "  train        Train CRNN, 2 phases (RESUME=checkpoint-dir)"
+	@echo "  evaluate     CER/WER on a split (CKPT=dir, SPLIT=, DECODE=, MAX=)"
+	@echo "  infer        OCR one image (IMAGE=, CKPT=dir, DECODE=)"
+	@echo "  tune-lm      Grid-search KenLM alpha/beta on val (CKPT=dir, MAX=, ALPHAS=, BETAS=)"
 	@echo "  gui          Launch GTK4 OCR viewer (vie-ocr-gui)"
 	@echo "  clean-lm     Remove generated LM artifacts (lm/)"
 
@@ -51,14 +51,15 @@ build-lm:
 train:
 	$(CLI) train --config $(CONFIG) $(if $(RESUME),--resume $(RESUME),) $(if $(REBUILD),--rebuild-data,)
 
+# evaluate / infer / tune-lm load CKPT dir: {model.weights.h5, config.yaml}
 evaluate:
-	$(CLI) evaluate --config $(CONFIG) --checkpoint $(CKPT) --split $(SPLIT) $(if $(DECODE),--decode $(DECODE),) $(if $(MAX),--max-samples $(MAX),)
+	$(CLI) evaluate --checkpoint $(CKPT) --split $(SPLIT) $(if $(DECODE),--decode $(DECODE),) $(if $(MAX),--max-samples $(MAX),)
 
 infer:
-	$(CLI) infer --config $(CONFIG) --checkpoint $(CKPT) --image $(IMAGE) $(if $(DECODE),--decode $(DECODE),)
+	$(CLI) infer --checkpoint $(CKPT) --image $(IMAGE) $(if $(DECODE),--decode $(DECODE),)
 
 tune-lm:
-	$(CLI) tune-lm --config $(CONFIG) --checkpoint $(CKPT) --split $(TUNE_SPLIT) $(if $(MAX),--max-samples $(MAX),) $(if $(ALPHAS),--alphas $(ALPHAS),) $(if $(BETAS),--betas $(BETAS),)
+	$(CLI) tune-lm --checkpoint $(CKPT) --split $(TUNE_SPLIT) $(if $(MAX),--max-samples $(MAX),) $(if $(ALPHAS),--alphas $(ALPHAS),) $(if $(BETAS),--betas $(BETAS),)
 
 clean-lm:
 	rm -rf lm/

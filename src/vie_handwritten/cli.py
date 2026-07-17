@@ -30,7 +30,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     train_p = sub.add_parser("train", help="Train CRNN (2 phases: freeze CNN → train all)")
     train_p.add_argument("--config", default="configs/default.yaml")
-    train_p.add_argument("--resume", default=None, help="Checkpoint weights to resume from")
+    train_p.add_argument(
+        "--resume",
+        default=None,
+        help="Checkpoint directory ({model.weights.h5, config.yaml}) to resume from",
+    )
     train_p.add_argument("--rebuild-data", action="store_true", help="Rebuild manifests first")
 
     lm_p = sub.add_parser("build-lm", help="Train KenLM syllable LM from train split")
@@ -39,23 +43,40 @@ def build_parser() -> argparse.ArgumentParser:
     lm_p.add_argument("--prune", type=int, default=0, help="prune threshold per order (0 = none)")
 
     eval_p = sub.add_parser("evaluate", help="Evaluate checkpoint (CER/WER)")
-    eval_p.add_argument("--config", default="configs/default.yaml")
-    eval_p.add_argument("--checkpoint", required=True)
+    eval_p.add_argument(
+        "--checkpoint",
+        required=True,
+        help="Checkpoint directory containing model.weights.h5 and config.yaml",
+    )
     eval_p.add_argument("--split", default="test", choices=["train", "val", "test"])
     eval_p.add_argument("--max-samples", type=int, default=None)
-    eval_p.add_argument("--decode", default=None, choices=["greedy", "beam", "beam_lm"],
-                        help="Override ctc.decode from config")
+    eval_p.add_argument(
+        "--decode",
+        default=None,
+        choices=["greedy", "beam", "beam_lm"],
+        help="Override ctc.decode from the checkpoint config",
+    )
 
     infer_p = sub.add_parser("infer", help="Run OCR on an image")
     infer_p.add_argument("--image", required=True)
-    infer_p.add_argument("--checkpoint", required=True)
-    infer_p.add_argument("--config", default="configs/default.yaml")
-    infer_p.add_argument("--decode", default=None, choices=["greedy", "beam", "beam_lm"],
-                         help="Override ctc.decode from config")
+    infer_p.add_argument(
+        "--checkpoint",
+        required=True,
+        help="Checkpoint directory containing model.weights.h5 and config.yaml",
+    )
+    infer_p.add_argument(
+        "--decode",
+        default=None,
+        choices=["greedy", "beam", "beam_lm"],
+        help="Override ctc.decode from the checkpoint config",
+    )
 
     tune_p = sub.add_parser("tune-lm", help="Grid-search KenLM alpha/beta on a split")
-    tune_p.add_argument("--config", default="configs/default.yaml")
-    tune_p.add_argument("--checkpoint", required=True)
+    tune_p.add_argument(
+        "--checkpoint",
+        required=True,
+        help="Checkpoint directory containing model.weights.h5 and config.yaml",
+    )
     tune_p.add_argument("--split", default="val", choices=["train", "val", "test"])
     tune_p.add_argument("--max-samples", type=int, default=300)
     tune_p.add_argument("--alphas", default="0.0,0.3,0.5,0.8,1.0")
@@ -96,7 +117,6 @@ def main(argv: list[str] | None = None) -> None:
         from vie_handwritten.eval import evaluate
 
         metrics = evaluate(
-            args.config,
             args.checkpoint,
             split=args.split,
             max_samples=args.max_samples,
@@ -106,12 +126,11 @@ def main(argv: list[str] | None = None) -> None:
     elif args.command == "infer":
         from vie_handwritten.eval import infer
 
-        print(infer(args.config, args.checkpoint, args.image, decode=args.decode))
+        print(infer(args.checkpoint, args.image, decode=args.decode))
     elif args.command == "tune-lm":
         from vie_handwritten.tune import tune_lm
 
         tune_lm(
-            args.config,
             args.checkpoint,
             split=args.split,
             max_samples=args.max_samples,

@@ -44,11 +44,11 @@ make build-data
 
 ```
 Makefile                  # CLI-hoá các tác vụ thường dùng (xem `make help`)
-configs/default.yaml      # toàn bộ cấu hình
+configs/default.yaml      # cấu hình train / build-data (không dùng khi infer)
 screenshots/              # ảnh chụp GUI
 src/vie_handwritten/
   cli.py          # entry point `vie-ocr` (build-data/train/build-lm/evaluate/infer/tune-lm)
-  utils.py        # config I/O, seed, paths, GPU runtime
+  utils.py        # config I/O, checkpoint helpers, seed, paths, GPU runtime
   charset.py      # bảng ký tự ↔ index
   preprocess.py   # OpenCV + scikit-image (ảnh → tensor)
   postprocess.py  # CTC decode + Underthesea/local chuẩn hoá tiếng Việt; lớp CTCDecoder
@@ -78,19 +78,22 @@ make sync          # = uv sync (khuyến nghị)
 
 ```bash
 make build-data
-make train
-make evaluate CKPT=checkpoints/best.weights.h5 SPLIT=test
-make infer IMAGE=path/to/line.png CKPT=checkpoints/best.weights.h5
+make train                                    # → checkpoints/{model.weights.h5, config.yaml}
+make evaluate CKPT=checkpoints SPLIT=test
+make infer IMAGE=path/to/line.png CKPT=checkpoints
 ```
 
+Checkpoint là **thư mục** chuẩn: `model.weights.h5` + `config.yaml` (copy config train).
+`evaluate` / `infer` / GUI chỉ load từ thư mục đó — không dùng `configs/*.yaml`.
+
 Tương đương khi không dùng make: `vie-ocr build-data`,
-`vie-ocr evaluate --checkpoint ... --split test`, ...
+`vie-ocr evaluate --checkpoint checkpoints --split test`, ...
 
 ## GUI (GTK4 + libadwaita)
 
-Viewer desktop: load checkpoint `.weights.h5`, duyệt folder ảnh dòng, nhận dạng realtime
-(beam_lm khi có KenLM), so sánh Pred ↔ GT nếu folder có `label.json`
-(Levenshtein / CER / WER), hiển thị GPU và latency (ms).
+Viewer desktop: chọn thư mục checkpoint (`model.weights.h5` + `config.yaml`), duyệt folder
+ảnh dòng, nhận dạng realtime (beam_lm khi có KenLM), so sánh Pred ↔ GT nếu folder có
+`label.json` (Levenshtein / CER / WER), hiển thị GPU và latency (ms).
 
 ```bash
 # Fedora: gtk4-devel libadwaita-devel gobject-introspection-devel cairo-gobject-devel …
@@ -113,8 +116,9 @@ Chi tiết: [`src/gui/README.md`](src/gui/README.md).
   (`train.phase1.max_train_samples`) để head hội tụ nhanh, LR `1e-3`.
 - **Phase 2** — mở băng toàn bộ, train cả CNN + BiLSTM trên **toàn bộ** dữ liệu, LR `1e-4`.
 
-Cả hai pha dùng chung `checkpoints/best.weights.h5` (theo `val_loss` thấp nhất).
-Mỗi pha là một lượt `model.fit` trên dataset hữu hạn (1 epoch = 1 lượt qua dữ liệu).
+Cả hai pha dùng chung thư mục `checkpoints/` với `model.weights.h5` (theo `val_loss`
+thấp nhất) và `config.yaml`. Mỗi pha là một lượt `model.fit` trên dataset hữu hạn
+(1 epoch = 1 lượt qua dữ liệu).
 
 ## Debug quá trình training (overfit tập nhỏ)
 
@@ -169,17 +173,18 @@ Python binding `kenlm` + `pyctcdecode` đã được `make sync` cài sẵn (ken
 ```bash
 make build-lm                              # → lm/vi.binary + lm/unigrams.txt
 # So sánh nhanh trên test (override decode method):
-make evaluate CKPT=checkpoints/best.weights.h5 SPLIT=test DECODE=greedy
-make evaluate CKPT=checkpoints/best.weights.h5 SPLIT=test DECODE=beam_lm
+make evaluate CKPT=checkpoints SPLIT=test DECODE=greedy
+make evaluate CKPT=checkpoints SPLIT=test DECODE=beam_lm
 ```
 
-Đặt `ctc.decode: beam_lm` trong `configs/default.yaml` để dùng mặc định. Các tham số
-LM (`alpha`, `beta`, `beam_width`, `token_min_logp`) nằm trong khối `ctc`.
+Đặt `ctc.decode: beam_lm` trong `configs/default.yaml` (train) để ghi vào
+`config.yaml` của checkpoint. Các tham số LM (`alpha`, `beta`, `beam_width`,
+`token_min_logp`) nằm trong khối `ctc`.
 
 ### 4. Tune trọng số LM (alpha/beta) trên val
 
 ```bash
-make tune-lm CKPT=checkpoints/best.weights.h5 ALPHAS=0.0,0.3,0.5,0.8,1.0 BETAS=0.0,0.5,1.0,1.5
+make tune-lm CKPT=checkpoints ALPHAS=0.0,0.3,0.5,0.8,1.0 BETAS=0.0,0.5,1.0,1.5
 ```
 
 Cache logits một lần rồi quét lưới alpha/beta, in CER/WER và điểm tốt nhất để chép vào config.

@@ -3,7 +3,8 @@
   Phase 1 — freeze the CNN backbone, train the BiLSTM head on a small subset.
   Phase 2 — unfreeze everything, train the whole network on the full dataset.
 
-Both phases share one ``best.weights.h5`` tracking the lowest val_loss.
+Both phases share one checkpoint dir ``{model.weights.h5, config.yaml}``
+tracking the lowest val_loss.
 """
 
 from __future__ import annotations
@@ -30,12 +31,14 @@ from vie_handwritten.model import (
 from vie_handwritten.postprocess import CTCDecoder
 from vie_handwritten.preprocess import load_image, preprocess
 from vie_handwritten.utils import (
+    WEIGHTS_NAME,
     charset_path,
+    checkpoint_weights_path,
     configure_runtime,
     ensure_dir,
     load_config,
     project_root,
-    save_config,
+    save_checkpoint_config,
     set_seed,
 )
 
@@ -208,7 +211,7 @@ class DecodeMetrics(keras.callbacks.Callback):
             underthesea=bool(pp_cfg.get("underthesea", True)),
             underthesea_tokenizer=str(pp_cfg.get("underthesea_tokenizer", "regex")),
         )
-        self.ocr = OCRModel(crnn, charset, decoder)
+        self.ocr = OCRModel(crnn, charset, decoder, config=config)
         self.records = records
         self.config = config
         self.tag = tag
@@ -226,7 +229,7 @@ class DecodeMetrics(keras.callbacks.Callback):
         if (epoch + 1) % self.every != 0:
             return
 
-        metrics = evaluate_split(self.ocr, self.records, self.config)
+        metrics = evaluate_split(self.ocr, self.records)
         logs[f"{self.tag}_cer"] = metrics["cer"]
         logs[f"{self.tag}_wer"] = metrics["wer"]
 
@@ -294,7 +297,8 @@ def train(
     ckpt_root = ensure_dir(project_root() / config["train"].get("checkpoint_dir", "checkpoints"))
     report_dir = ensure_dir(project_root() / config["train"].get("report_dir", "reports"))
     log_root = config["train"].get("log_dir", "runs")
-    save_config(config, ckpt_root / "config_used.yaml")
+    save_checkpoint_config(config, ckpt_root)
+    weights_path = ckpt_root / WEIGHTS_NAME
 
     manifests = ensure_manifests(config, rebuild=rebuild_data)
     train_records = load_manifest(manifests["train"])
@@ -307,13 +311,13 @@ def train(
 
     crnn = build_crnn(config, num_classes=charset.num_classes)
     if resume_from is not None:
-        logger.info("Loading weights from %s", resume_from)
-        load_crnn_weights(crnn, resume_from)
+        resume_weights = checkpoint_weights_path(resume_from)
+        logger.info("Loading weights from %s", resume_weights)
+        load_crnn_weights(crnn, resume_weights)
     blank_index = int(config.get("ctc", {}).get("blank_index", charset.blank_index))
     trainer = OCRTrainer(crnn, blank_index=blank_index, name="ocr_trainer")
 
-    best_path = ckpt_root / "best.weights.h5"
-    save_best = SaveBest(crnn, best_path)
+    save_best = SaveBest(crnn, weights_path)
     optimizer_name = str(config["train"].get("optimizer", "adam"))
     clipnorm = config["train"].get("grad_clipnorm")
 
@@ -370,19 +374,24 @@ def train(
             verbose=1,
         )
 
-    if best_path.is_file():
-        load_crnn_weights(crnn, best_path)
+    if weights_path.is_file():
+        load_crnn_weights(crnn, weights_path)
         logger.info("Restored best weights (val_loss=%.4f)", save_best.best)
 
-    ocr = OCRModel(crnn, charset, CTCDecoder.from_config(charset, config))
-    test_metrics = evaluate_split(ocr, load_manifest(manifests["test"]), config)
-    report = {"best_val_loss": save_best.best, "test": test_metrics, "weights": str(best_path)}
+    ocr = OCRModel(crnn, charset, CTCDecoder.from_config(charset, config), config=config)
+    test_metrics = evaluate_split(ocr, load_manifest(manifests["test"]))
+    report = {
+        "best_val_loss": save_best.best,
+        "test": test_metrics,
+        "checkpoint": str(ckpt_root),
+        "weights": str(weights_path),
+    }
     (report_dir / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     logger.info(
         "REPORT test CER=%.4f WER=%.4f (n=%d) → %s",
         test_metrics["cer"],
         test_metrics["wer"],
         test_metrics["n"],
-        best_path,
+        ckpt_root,
     )
     return trainer

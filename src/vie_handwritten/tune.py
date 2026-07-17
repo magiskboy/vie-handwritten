@@ -18,7 +18,7 @@ from vie_handwritten.eval import evaluate_corpus
 from vie_handwritten.model import build_crnn, load_crnn_weights
 from vie_handwritten.postprocess import build_lm_decoder, ctc_lm_decode, normalize_text
 from vie_handwritten.preprocess import load_image, preprocess
-from vie_handwritten.utils import charset_path, load_config
+from vie_handwritten.utils import charset_path, checkpoint_weights_path, load_checkpoint_config
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +27,6 @@ DEFAULT_BETAS = (0.0, 0.5, 1.0, 1.5)
 
 
 def tune_lm(
-    config_path: str | Path,
     checkpoint: str | Path,
     *,
     split: str = "val",
@@ -36,7 +35,7 @@ def tune_lm(
     betas: Sequence[float] = DEFAULT_BETAS,
 ) -> dict[str, Any]:
     """Sweep (alpha, beta) on ``split`` and return per-point + best CER/WER."""
-    config = load_config(config_path)
+    config = load_checkpoint_config(checkpoint)
     ctc_cfg = config.setdefault("ctc", {})
     ctc_cfg["decode"] = "beam_lm"
     pp_cfg = config.get("postprocess", {})
@@ -47,7 +46,7 @@ def tune_lm(
         records = records[:max_samples]
 
     crnn = build_crnn(config, num_classes=charset.num_classes)
-    load_crnn_weights(crnn, checkpoint)
+    load_crnn_weights(crnn, checkpoint_weights_path(checkpoint))
 
     logger.info("Caching logits for %d %s samples ...", len(records), split)
     cached = []  # (logits[1, T, C], ref)

@@ -25,7 +25,7 @@ class InfoPanel(Gtk.Box):
         self._vals: dict[str, Gtk.Label] = {}
         for i, (key, label) in enumerate(
             (
-                ("weights", "File"),
+                ("checkpoint", "Checkpoint"),
                 ("decode", "Decode"),
                 ("device", "GPU"),
                 ("status", "Status"),
@@ -48,9 +48,9 @@ class InfoPanel(Gtk.Box):
         self._vals["status"].set_label(text or "—")
 
     def update(self, info: dict[str, Any]) -> None:
-        weights = info.get("weights") or ""
-        self._vals["weights"].set_label(self._basename(weights) if weights else "—")
-        self._vals["weights"].set_tooltip_text(str(weights) if weights else "")
+        ckpt = info.get("checkpoint") or ""
+        self._vals["checkpoint"].set_label(self._basename(ckpt) if ckpt else "—")
+        self._vals["checkpoint"].set_tooltip_text(str(ckpt) if ckpt else "")
 
         decode = str(info.get("decode") or "—")
         note = info.get("decode_note") or ""

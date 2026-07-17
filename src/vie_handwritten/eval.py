@@ -2,7 +2,9 @@
 
 Text decoding + Vietnamese normalization live in :mod:`vie_handwritten.postprocess`
 (wrapped by :class:`vie_handwritten.model.OCRModel`); this module only measures
-quality and drives the "load checkpoint -> decode a split / an image" flow.
+quality and drives the "load checkpoint dir -> decode a split / an image" flow.
+
+A checkpoint is a directory containing ``model.weights.h5`` and ``config.yaml``.
 """
 
 from __future__ import annotations
@@ -10,14 +12,12 @@ from __future__ import annotations
 import logging
 import random
 from pathlib import Path
-from typing import Any
 
 import editdistance
 
 from vie_handwritten.dataset import ensure_manifests, load_manifest, resolve_image_path
 from vie_handwritten.model import OCRModel
 from vie_handwritten.preprocess import load_image, preprocess
-from vie_handwritten.utils import load_config
 
 logger = logging.getLogger(__name__)
 
@@ -54,9 +54,9 @@ def evaluate_corpus(references: list[str], hypotheses: list[str]) -> dict[str, f
 def evaluate_split(
     model: OCRModel,
     records: list[dict[str, str]],
-    config: dict[str, Any],
 ) -> dict[str, float]:
     """Decode every record with an in-memory ``OCRModel`` -> CER/WER metrics."""
+    config = model.config
     refs, hyps = [], []
     for rec in records:
         image = load_image(str(resolve_image_path(config, rec)))
@@ -67,17 +67,15 @@ def evaluate_split(
 
 
 def evaluate(
-    config_path: str | Path,
     checkpoint: str | Path,
     *,
     split: str = "test",
     max_samples: int | None = None,
     decode: str | None = None,
 ) -> dict[str, float]:
-    """Load a checkpoint and evaluate CER/WER on a manifest split."""
-    config = load_config(config_path)
-    if decode:
-        config.setdefault("ctc", {})["decode"] = decode
+    """Load a checkpoint directory and evaluate CER/WER on a manifest split."""
+    model = OCRModel.from_checkpoint(checkpoint, decode=decode)
+    config = model.config
     manifests = ensure_manifests(config)
     if split not in manifests:
         raise ValueError(f"Unknown split={split}")
@@ -86,23 +84,18 @@ def evaluate(
         seed = int(config.get("project", {}).get("seed", 42))
         records = random.Random(seed).sample(records, max_samples)
 
-    model = OCRModel.from_checkpoint(config, checkpoint)
-    metrics = evaluate_split(model, records, config)
+    metrics = evaluate_split(model, records)
     logger.info("split=%s n=%s CER=%.4f WER=%.4f", split, metrics["n"], metrics["cer"], metrics["wer"])
     return metrics
 
 
 def infer(
-    config_path: str | Path,
     checkpoint: str | Path,
     image_path: str | Path,
     *,
     decode: str | None = None,
 ) -> str:
     """Run OCR on a single image file and return the decoded text."""
-    config = load_config(config_path)
-    if decode:
-        config.setdefault("ctc", {})["decode"] = decode
-    model = OCRModel.from_checkpoint(config, checkpoint)
-    arr = preprocess(load_image(str(image_path)), config["preprocess"])
+    model = OCRModel.from_checkpoint(checkpoint, decode=decode)
+    arr = preprocess(load_image(str(image_path)), model.config["preprocess"])
     return model.recognize(arr)
