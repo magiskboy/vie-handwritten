@@ -9,11 +9,12 @@ TUNE_SPLIT ?= val
 CLI        := uv run python -m vie_handwritten.cli
 KENLM_DIR  := third_party/kenlm
 
-.PHONY: help sync build-kenlm build-data build-lm train evaluate infer tune-lm clean-lm
+.PHONY: help sync sync-gui build-kenlm build-data build-lm train evaluate infer tune-lm gui clean-lm
 
 help:
 	@echo "Targets (override vars like CKPT=, IMAGE=, SPLIT=, DECODE=, MAX=):"
 	@echo "  sync         Install/refresh Python deps (uv sync)"
+	@echo "  sync-gui     Install deps including GTK GUI extra (pygobject)"
 	@echo "  build-kenlm  Build KenLM lmplz/build_binary from submodule (needs cmake + boost-devel)"
 	@echo "  build-data   Build normalized JSONL manifests"
 	@echo "  build-lm     Train KenLM syllable LM from train split (ORDER=, PRUNE=)"
@@ -21,10 +22,17 @@ help:
 	@echo "  evaluate     CER/WER on a split (CKPT=, SPLIT=, DECODE=, MAX=)"
 	@echo "  infer        OCR one image (IMAGE=, CKPT=, DECODE=)"
 	@echo "  tune-lm      Grid-search KenLM alpha/beta on val (CKPT=, MAX=, ALPHAS=, BETAS=)"
+	@echo "  gui          Launch GTK4 OCR viewer (vie-ocr-gui)"
 	@echo "  clean-lm     Remove generated LM artifacts (lm/)"
 
 sync:
 	uv sync
+
+sync-gui:
+	uv sync --extra gui
+
+gui:
+	uv run vie-ocr-gui
 
 build-kenlm:
 	@command -v cmake >/dev/null 2>&1 || { echo "cmake not found. Install via package manager (e.g. 'sudo dnf install cmake')."; exit 1; }

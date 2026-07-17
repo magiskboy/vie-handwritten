@@ -1,0 +1,277 @@
+"""GTK4 + libadwaita OCR viewer application."""
+
+from __future__ import annotations
+
+import logging
+import sys
+from pathlib import Path
+
+import gi
+
+gi.require_version("Gtk", "4.0")
+gi.require_version("Adw", "1")
+from gi.repository import Adw, Gdk, Gio, GLib, Gtk  # noqa: E402
+
+from gui.content_view import ContentView  # noqa: E402
+from gui.image_list import ImageList  # noqa: E402
+from gui.info_panel import InfoPanel  # noqa: E402
+from gui.model_service import (  # noqa: E402
+    ModelService,
+    compare_prediction,
+    load_folder_labels,
+    lookup_label,
+)
+
+logger = logging.getLogger(__name__)
+
+APP_ID = "io.github.vie_handwritten.ocr"
+_CSS_PATH = Path(__file__).with_name("style.css")
+
+
+def _load_css() -> None:
+    if not _CSS_PATH.is_file():
+        return
+    display = Gdk.Display.get_default()
+    if display is None:
+        return
+    provider = Gtk.CssProvider()
+    provider.load_from_path(str(_CSS_PATH))
+    Gtk.StyleContext.add_provider_for_display(
+        display,
+        provider,
+        Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
+    )
+
+
+class MainWindow(Adw.ApplicationWindow):
+    def __init__(self, app: Adw.Application) -> None:
+        super().__init__(application=app, title="vie-OCR")
+        self.set_default_size(1120, 740)
+
+        self.service = ModelService()
+        self._cache: dict[str, tuple[str, float]] = {}
+        self._labels: dict[str, str] = {}
+        self._current_image: str | None = None
+        self._toast_overlay = Adw.ToastOverlay()
+
+        self._image_list = ImageList()
+        self._image_list.connect("image-selected", self._on_image_selected)
+        self._info = InfoPanel()
+        self._content = ContentView()
+        self._content.connect("rerun", self._on_rerun)
+
+        # One continuous sidebar surface (list + compact model footer).
+        sidebar_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
+        sidebar_box.add_css_class("vie-sidebar")
+        sidebar_box.append(self._image_list)
+        sidebar_box.append(self._info)
+
+        sidebar_page = Adw.NavigationPage(title="Ảnh", child=sidebar_box)
+        content_page = Adw.NavigationPage(title="Nhận dạng", child=self._content)
+
+        split = Adw.NavigationSplitView()
+        split.set_sidebar(sidebar_page)
+        split.set_content(content_page)
+        split.set_min_sidebar_width(240)
+        split.set_max_sidebar_width(340)
+        split.set_sidebar_width_fraction(0.24)
+
+        toolbar = Adw.ToolbarView()
+        header = Adw.HeaderBar()
+
+        load_model_btn = Gtk.Button(label="Load Model")
+        load_model_btn.add_css_class("suggested-action")
+        load_model_btn.connect("clicked", self._on_load_model)
+        header.pack_start(load_model_btn)
+
+        load_folder_btn = Gtk.Button(label="Load Images")
+        load_folder_btn.connect("clicked", self._on_load_folder)
+        header.pack_start(load_folder_btn)
+
+        toolbar.add_top_bar(header)
+        toolbar.set_content(split)
+        self._toast_overlay.set_child(toolbar)
+        self.set_content(self._toast_overlay)
+
+        bp = Adw.Breakpoint.new(Adw.BreakpointCondition.parse("max-width: 720sp"))
+        bp.add_setter(split, "collapsed", True)
+        self.add_breakpoint(bp)
+
+    def toast(self, message: str) -> None:
+        self._toast_overlay.add_toast(Adw.Toast(title=message, timeout=3))
+
+    def _on_load_model(self, _btn: Gtk.Button) -> None:
+        dialog = Gtk.FileDialog(title="Chọn checkpoint (.weights.h5)")
+        filters = Gio.ListStore.new(Gtk.FileFilter)
+        filt = Gtk.FileFilter(name="Keras weights (*.h5)")
+        filt.add_pattern("*.h5")
+        filt.add_pattern("*.weights.h5")
+        filters.append(filt)
+        all_f = Gtk.FileFilter(name="All files")
+        all_f.add_pattern("*")
+        filters.append(all_f)
+        dialog.set_filters(filters)
+        dialog.open(self, None, self._on_model_chosen)
+
+    def _on_model_chosen(self, dialog: Gtk.FileDialog, result: Gio.AsyncResult) -> None:
+        try:
+            file = dialog.open_finish(result)
+        except GLib.Error as exc:
+            if exc.matches(Gio.io_error_quark(), Gio.IOErrorEnum.CANCELLED):
+                return
+            self.toast(f"Không mở được file: {exc.message}")
+            return
+        if file is None:
+            return
+        path = file.get_path()
+        if not path:
+            self.toast("Đường dẫn checkpoint không hợp lệ")
+            return
+
+        self._info.set_status("Đang load model…")
+        self._content.set_busy(True)
+        self._cache.clear()
+
+        def _done(info, err) -> None:
+            def _ui() -> bool:
+                self._content.set_busy(False)
+                if err is not None:
+                    self._info.set_status("Load thất bại")
+                    self.toast(f"Load model lỗi: {err}")
+                    logger.exception("load model failed", exc_info=err)
+                    return False
+                assert info is not None
+                self._info.update(info)
+                note = info.get("decode_note") or ""
+                self.toast("Đã load model" + (f" ({note})" if note else ""))
+                if self._current_image:
+                    self._recognize(self._current_image)
+                return False
+
+            GLib.idle_add(_ui)
+
+        if not self.service.load_async(path, _done):
+            self._content.set_busy(False)
+            self.toast("Đang bận, thử lại sau")
+
+    def _on_load_folder(self, _btn: Gtk.Button) -> None:
+        dialog = Gtk.FileDialog(title="Chọn thư mục ảnh")
+        dialog.select_folder(self, None, self._on_folder_chosen)
+
+    def _on_folder_chosen(self, dialog: Gtk.FileDialog, result: Gio.AsyncResult) -> None:
+        try:
+            folder = dialog.select_folder_finish(result)
+        except GLib.Error as exc:
+            if exc.matches(Gio.io_error_quark(), Gio.IOErrorEnum.CANCELLED):
+                return
+            self.toast(f"Không mở được thư mục: {exc.message}")
+            return
+        if folder is None:
+            return
+        path = folder.get_path()
+        if not path:
+            self.toast("Đường dẫn thư mục không hợp lệ")
+            return
+
+        self._cache.clear()
+        self._content.clear()
+        self._current_image = None
+        self._labels = load_folder_labels(path)
+        n = self._image_list.set_folder(path)
+        if self._labels:
+            matched = sum(1 for p in Path(path).iterdir() if p.name in self._labels)
+            self.toast(f"Đã tải {n} ảnh · {len(self._labels)} labels ({matched} khớp tên)")
+        else:
+            self.toast(f"Đã tải {n} ảnh (không có label.json)")
+
+    def _gt_for(self, path: str) -> str | None:
+        return lookup_label(self._labels, path)
+
+    def _comparison_for(self, path: str, prediction: str) -> dict | None:
+        gt = self._gt_for(path)
+        if gt is None:
+            return None
+        return compare_prediction(gt, prediction)
+
+    def _on_image_selected(self, _list: ImageList, path: str) -> None:
+        self._current_image = path
+        self._content.show_image(path, ground_truth=self._gt_for(path))
+        if path in self._cache:
+            text, elapsed_ms = self._cache[path]
+            self._content.set_prediction(
+                text,
+                elapsed_ms=elapsed_ms,
+                comparison=self._comparison_for(path, text),
+            )
+            return
+        if not self.service.ready:
+            self._content.set_message("Hãy load model trước.")
+            return
+        self._recognize(path)
+
+    def _on_rerun(self, _view: ContentView) -> None:
+        if self._current_image:
+            self._cache.pop(self._current_image, None)
+            self._recognize(self._current_image)
+
+    def _recognize(self, path: str) -> None:
+        if not self.service.ready:
+            self._content.set_message("Hãy load model trước.")
+            return
+
+        self._content.set_busy(True)
+        self._content.set_message("Đang nhận dạng…")
+        self._info.set_status("Đang nhận dạng…")
+
+        def _done(text, elapsed_ms, err) -> None:
+            def _ui() -> bool:
+                self._content.set_busy(False)
+                if err is not None:
+                    self._info.set_status("Lỗi nhận dạng")
+                    self._content.set_message(f"Lỗi: {err}")
+                    self.toast(f"OCR lỗi: {err}")
+                    logger.exception("recognize failed", exc_info=err)
+                    return False
+                assert text is not None and elapsed_ms is not None
+                self._cache[path] = (text, elapsed_ms)
+                self._image_list.mark_recognized(path, recognized=True)
+                if self._current_image == path:
+                    self._content.set_prediction(
+                        text,
+                        elapsed_ms=elapsed_ms,
+                        comparison=self._comparison_for(path, text),
+                    )
+                self._info.set_status("Sẵn sàng")
+                return False
+
+            GLib.idle_add(_ui)
+
+        if not self.service.recognize_async(path, _done):
+            self._content.set_busy(False)
+            self.toast("Đang bận, thử lại sau")
+
+
+class OCRApplication(Adw.Application):
+    def __init__(self) -> None:
+        super().__init__(application_id=APP_ID, flags=Gio.ApplicationFlags.FLAGS_NONE)
+        self.connect("startup", self._on_startup)
+        self.connect("activate", self._on_activate)
+
+    def _on_startup(self, _app: Adw.Application) -> None:
+        _load_css()
+
+    def _on_activate(self, app: Adw.Application) -> None:
+        win = app.get_active_window()
+        if win is None:
+            win = MainWindow(app)
+        win.present()
+
+
+def main(argv: list[str] | None = None) -> int:
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+    app = OCRApplication()
+    return app.run(argv if argv is not None else sys.argv)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

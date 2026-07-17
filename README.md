@@ -45,6 +45,7 @@ make build-data
 ```
 Makefile                  # CLI-hoá các tác vụ thường dùng (xem `make help`)
 configs/default.yaml      # toàn bộ cấu hình
+screenshots/              # ảnh chụp GUI
 src/vie_handwritten/
   cli.py          # entry point `vie-ocr` (build-data/train/build-lm/evaluate/infer/tune-lm)
   utils.py        # config I/O, seed, paths, GPU runtime
@@ -57,6 +58,7 @@ src/vie_handwritten/
   eval.py         # metrics CER/WER + evaluate/infer (dùng OCRModel)
   kenlm.py        # train KenLM n-gram LM từ transcript tập train
   tune.py         # grid-search alpha/beta trên val
+src/gui/                  # GTK4 + libadwaita viewer (`vie-ocr-gui`)
 ```
 
 Chạy CLI qua `make <target>`, hoặc trực tiếp `vie-ocr <command>` /
@@ -83,6 +85,27 @@ make infer IMAGE=path/to/line.png CKPT=checkpoints/best.weights.h5
 
 Tương đương khi không dùng make: `vie-ocr build-data`,
 `vie-ocr evaluate --checkpoint ... --split test`, ...
+
+## GUI (GTK4 + libadwaita)
+
+Viewer desktop: load checkpoint `.weights.h5`, duyệt folder ảnh dòng, nhận dạng realtime
+(beam_lm khi có KenLM), so sánh Pred ↔ GT nếu folder có `label.json`
+(Levenshtein / CER / WER), hiển thị GPU và latency (ms).
+
+```bash
+# Fedora: gtk4-devel libadwaita-devel gobject-introspection-devel cairo-gobject-devel …
+make sync-gui
+make gui            # = uv run vie-ocr-gui
+```
+
+Chi tiết: [`src/gui/README.md`](src/gui/README.md).
+
+| Exact match | Exact match |
+|:-----------:|:-----------:|
+| ![vie-OCR — exact, 608 ms](screenshots/1.png) | ![vie-OCR — exact, 583 ms](screenshots/2.png) |
+| ![vie-OCR — exact, 570 ms](screenshots/3.png) | ![vie-OCR — exact, 104 ms](screenshots/4.png) |
+| Diff (CER / WER) | Diff (CER / WER) |
+| ![vie-OCR — Levenshtein 3](screenshots/5.png) | ![vie-OCR — Levenshtein 2](screenshots/6.png) |
 
 ## Hai pha huấn luyện
 

@@ -1,0 +1,79 @@
+/* vie-OCR — compact Adwaita layout */
+
+.vie-sidebar {
+  background-color: alpha(@window_bg_color, 1.0);
+}
+
+.vie-sidebar-header {
+  padding: 10px 14px 6px 14px;
+  font-weight: 600;
+}
+
+.vie-sidebar-footer {
+  padding: 10px 14px 14px 14px;
+  border-top: 1px solid alpha(@borders, 0.6);
+}
+
+.vie-kv-key {
+  opacity: 0.65;
+  font-size: 0.85em;
+  min-width: 72px;
+}
+
+.vie-kv-val {
+  font-size: 0.9em;
+}
+
+.vie-image-pane {
+  background-color: alpha(@view_bg_color, 1.0);
+  border-radius: 12px;
+  border: 1px solid alpha(@borders, 0.5);
+}
+
+.vie-result-pane {
+  background-color: alpha(@card_bg_color, 1.0);
+  border-radius: 12px;
+  border: 1px solid alpha(@borders, 0.5);
+  padding: 12px 14px;
+}
+
+.vie-result-title {
+  font-weight: 600;
+}
+
+.vie-result-text {
+  font-size: 1.05em;
+  line-height: 1.45;
+  padding: 0;
+  margin: 0;
+}
+
+.vie-filename {
+  opacity: 0.7;
+  font-size: 0.85em;
+}
+
+.vie-latency {
+  font-features: "tnum";
+  font-size: 0.9em;
+  margin-start: 8px;
+}
+
+.vie-metrics {
+  font-features: "tnum";
+  font-size: 0.9em;
+  margin-top: 2px;
+}
+
+.vie-metrics-ok {
+  color: @success_color;
+  opacity: 1;
+}
+
+.vie-metrics-bad {
+  opacity: 0.9;
+}
+
+.vie-list-row {
+  padding: 2px 4px;
+}
