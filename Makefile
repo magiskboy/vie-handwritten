@@ -11,12 +11,13 @@ OVCLI      := uv run python -m converter.cli
 KENLM_DIR  := third_party/kenlm
 OVDIR      ?= $(CKPT)/openvino
 
-.PHONY: help sync sync-gui sync-ov build-kenlm build-data build-lm train train-word train-line curriculum evaluate infer tune-lm gui clean-lm convert-ov bench-ov-acc bench-ov-perf
+.PHONY: help sync sync-gui sync-ov build-kenlm build-data build-lm train train-word train-line curriculum evaluate infer tune-lm gui clean-lm convert-ov bench-ov-acc bench-ov-perf demo demo-ov demo-vendor sync-demo
 
 help:
 	@echo "Targets (override vars like CKPT=, IMAGE=, SPLIT=, DECODE=, MAX=):"
 	@echo "  sync         Install/refresh Python deps (uv sync)"
 	@echo "  sync-gui     Install deps including GTK GUI extra (pygobject)"
+	@echo "  sync-demo    Install form-ocr-demo workspace package + openvino"
 	@echo "  build-kenlm  Build KenLM lmplz/build_binary from submodule (needs cmake + boost-devel)"
 	@echo "  build-data   Build normalized JSONL manifests"
 	@echo "  build-lm     Train KenLM syllable LM from train split (ORDER=, PRUNE=)"
@@ -28,6 +29,9 @@ help:
 	@echo "  infer        OCR one image (IMAGE=, CKPT=dir, DECODE=)"
 	@echo "  tune-lm      Grid-search KenLM alpha/beta on val (CKPT=dir, MAX=, ALPHAS=, BETAS=)"
 	@echo "  gui          Launch GTK4 OCR viewer (vie-ocr-gui)"
+	@echo "  demo         Launch form-field extraction demo (form-ocr)"
+	@echo "  demo-vendor  Copy $(CKPT)/openvino → demo/models/openvino"
+	@echo "  demo-ov      Convert CKPT to OV (BATCHES=1) + vendor into demo/models"
 	@echo "  convert-ov   Convert checkpoint -> OpenVINO FP16+INT8 IR (CKPT=dir)"
 	@echo "  bench-ov-acc CER/WER: OV variants vs Keras (CKPT=dir, OVDIR=, SPLIT=)"
 	@echo "  bench-ov-perf CPU latency/throughput per precision x batch (CKPT=dir, OVDIR=)"
@@ -44,6 +48,27 @@ sync-ov:
 
 gui:
 	uv run vie-ocr-gui
+
+sync-demo:
+	uv sync --all-packages --extra openvino
+
+demo:
+	uv run --package form-ocr-demo form-ocr
+
+# Vendor a converted OpenVINO artifact into the demo app tree.
+DEMO_OV ?= demo/models/openvino
+
+demo-vendor:
+	@test -d $(CKPT)/openvino || { echo "Missing $(CKPT)/openvino — run: make convert-ov CKPT=$(CKPT) BATCHES=1"; exit 1; }
+	rm -rf $(DEMO_OV)
+	mkdir -p $(dir $(DEMO_OV))
+	cp -a $(CKPT)/openvino $(DEMO_OV)
+	@echo "Vendored $(CKPT)/openvino → $(DEMO_OV)"
+
+# Convert (batch 1 only) + vendor for the form-ocr demo.
+demo-ov: sync-demo
+	$(MAKE) convert-ov CKPT=$(CKPT) BATCHES=1
+	$(MAKE) demo-vendor CKPT=$(CKPT)
 
 build-kenlm:
 	@command -v cmake >/dev/null 2>&1 || { echo "cmake not found. Install via package manager (e.g. 'sudo dnf install cmake')."; exit 1; }

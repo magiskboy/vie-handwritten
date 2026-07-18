@@ -1,7 +1,30 @@
 [project]
-name = "demo"
+name = "form-ocr-demo"
 version = "0.1.0"
-description = "Add your description here"
+description = "GTK form-field extraction demo using OpenVINO Vietnamese handwriting OCR"
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "vie-handwritten",
+    "pygobject>=3.50",
+    "openvino>=2025.0",
+    "openpyxl>=3.1",
+    "opencv-python>=4.10",
+    "numpy>=1.26",
+]
+
+[project.scripts]
+form-ocr = "form_ocr.app:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/form_ocr"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"src/form_ocr/style.css" = "form_ocr/style.css"
+
+[tool.uv.sources]
+vie-handwritten = { workspace = true }
