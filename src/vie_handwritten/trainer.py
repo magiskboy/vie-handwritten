@@ -3,13 +3,13 @@
   Phase 1 — freeze the CNN backbone, train the BiLSTM head on a small subset.
   Phase 2 — unfreeze everything, train the whole network on the full dataset.
 
-Both phases share one checkpoint dir ``{model.weights.h5, config.yaml}``
+Both phases share one self-contained checkpoint dir
+(``model.weights.h5``, ``config.yaml``, ``charset.txt``, ``build_info.yaml``, ``lm/``)
 tracking the lowest val_loss.
 """
 
 from __future__ import annotations
 
-import json
 import logging
 import random
 from pathlib import Path
@@ -38,7 +38,7 @@ from vie_handwritten.utils import (
     ensure_dir,
     load_config,
     project_root,
-    save_checkpoint_config,
+    save_checkpoint_bundle,
     set_seed,
 )
 
@@ -295,9 +295,8 @@ def train(
     logger.info("Charset classes: %d", charset.num_classes)
 
     ckpt_root = ensure_dir(project_root() / config["train"].get("checkpoint_dir", "checkpoints"))
-    report_dir = ensure_dir(project_root() / config["train"].get("report_dir", "reports"))
     log_root = config["train"].get("log_dir", "runs")
-    save_checkpoint_config(config, ckpt_root)
+    save_checkpoint_bundle(config, ckpt_root)
     weights_path = ckpt_root / WEIGHTS_NAME
 
     manifests = ensure_manifests(config, rebuild=rebuild_data)
@@ -378,20 +377,17 @@ def train(
         load_crnn_weights(crnn, weights_path)
         logger.info("Restored best weights (val_loss=%.4f)", save_best.best)
 
+    # Refresh sidecar after training (weights sha may be useful in build_info later).
+    save_checkpoint_bundle(config, ckpt_root)
+
     ocr = OCRModel(crnn, charset, CTCDecoder.from_config(charset, config), config=config)
     test_metrics = evaluate_split(ocr, load_manifest(manifests["test"]))
-    report = {
-        "best_val_loss": save_best.best,
-        "test": test_metrics,
-        "checkpoint": str(ckpt_root),
-        "weights": str(weights_path),
-    }
-    (report_dir / "report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     logger.info(
-        "REPORT test CER=%.4f WER=%.4f (n=%d) → %s",
+        "test CER=%.4f WER=%.4f (n=%d) best_val_loss=%.4f → %s",
         test_metrics["cer"],
         test_metrics["wer"],
         test_metrics["n"],
+        save_best.best,
         ckpt_root,
     )
     return trainer

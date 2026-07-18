@@ -47,12 +47,11 @@ def _corpus(refs: list[str], hyps: list[str]) -> dict[str, float]:
 
 
 def _config_from_ov(ov_dir: str | Path) -> dict[str, Any]:
+    from converter.runtime import resolve_openvino_dir
     from vie_handwritten.utils import load_config
 
-    local = Path(ov_dir) / "config.yaml"
-    if local.is_file():
-        return load_config(local)
-    raise FileNotFoundError(f"No config.yaml in {ov_dir}; run `vie-ov convert` first.")
+    root = resolve_openvino_dir(ov_dir)
+    return load_config(root / "config.yaml")
 
 
 def _keras_hyps(checkpoint: str | Path, arrays: list[np.ndarray]) -> list[str]:

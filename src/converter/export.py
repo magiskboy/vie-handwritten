@@ -15,8 +15,9 @@ from typing import Any
 from vie_handwritten.charset import Charset
 from vie_handwritten.utils import (
     charset_path,
-    load_checkpoint_config,
     checkpoint_weights_path,
+    load_checkpoint_config,
+    resolve_checkpoint_dir,
 )
 
 from converter.config import ShapeSpec
@@ -46,14 +47,15 @@ def build_keras_net(checkpoint: str | Path) -> tuple[Any, dict[str, Any], Charse
     except RuntimeError:  # devices already initialized
         pass
 
-    config = load_checkpoint_config(checkpoint)
+    root = resolve_checkpoint_dir(checkpoint)
+    config = load_checkpoint_config(root)
     # Skip ImageNet transfer: the checkpoint weights are loaded right after.
     build_cfg = {**config, "model": {**config.get("model", {}), "pretrained": "none"}}
-    charset = Charset.from_file(charset_path(config))
+    charset = Charset.from_file(charset_path(config, artifact_root=root))
     net = build_crnn(build_cfg, num_classes=charset.num_classes)
     net.trainable = False
-    load_crnn_weights(net, checkpoint_weights_path(checkpoint))
-    logger.info("Loaded Keras CRNN from %s (%d classes)", checkpoint, charset.num_classes)
+    load_crnn_weights(net, checkpoint_weights_path(root))
+    logger.info("Loaded Keras CRNN from %s (%d classes)", root, charset.num_classes)
     return net, config, charset
 
 

@@ -28,12 +28,20 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     conv = sub.add_parser("convert", help="Convert a checkpoint to FP16 + INT8 IRs")
-    conv.add_argument("--checkpoint", required=True, help="Checkpoint dir (model.weights.h5 + config.yaml)")
+    conv.add_argument(
+        "--checkpoint",
+        required=True,
+        help="Self-contained Keras checkpoint dir (weights, config, charset, build_info, lm/)",
+    )
     conv.add_argument("--config", default="configs/openvino.yaml", help="OpenVINO settings YAML")
     conv.add_argument("--batches", default=None, help="Comma list, e.g. 1,16 (default from config)")
 
     acc = sub.add_parser("bench-accuracy", help="CER/WER: OV variants vs Keras")
-    acc.add_argument("--ov-dir", required=True, help="Directory with converted IRs (<checkpoint>/openvino)")
+    acc.add_argument(
+        "--ov-dir",
+        required=True,
+        help="Self-contained OpenVINO artifact dir (IRs + charset, config, meta, build_info, lm/)",
+    )
     acc.add_argument("--checkpoint", default=None, help="Keras checkpoint for baseline (optional)")
     acc.add_argument("--config", default="configs/openvino.yaml")
     acc.add_argument("--split", default=None, choices=["train", "val", "test"])

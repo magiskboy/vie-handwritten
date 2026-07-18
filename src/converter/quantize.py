@@ -1,21 +1,27 @@
 """NNCF INT8 post-training quantization + full convert orchestration.
 
 ``convert_checkpoint`` is the entry point behind ``vie-ov convert``: it builds the
-Keras net once, exports FP16 + INT8 IRs for each requested batch size, copies the
-config/charset next to the IR so the deploy path is self-contained, and records a
-quick greedy-CER sanity check (FP16 vs INT8) in ``meta.yaml``.
+Keras net once, exports FP16 + INT8 IRs for each requested batch size, writes a
+self-contained OpenVINO artifact (charset, LM, config, build_info, meta), and
+records a quick CER sanity check (FP16 vs INT8) in ``meta.yaml``.
 """
 
 from __future__ import annotations
 
 import logging
-import shutil
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
-from vie_handwritten.utils import charset_path
+from vie_handwritten.utils import (
+    CHARSET_NAME,
+    WEIGHTS_NAME,
+    checkpoint_weights_path,
+    file_sha256,
+    resolve_checkpoint_dir,
+    save_sidecar_bundle,
+)
 
 from converter.config import ArtifactPaths, ShapeSpec, shape_from_checkpoint
 from converter.data import load_split
@@ -90,13 +96,26 @@ def convert_checkpoint(
     """Convert a checkpoint to FP16 + INT8 IRs for each batch size; write meta."""
     import openvino as ov
 
+    try:
+        import nncf
+
+        nncf_version = getattr(nncf, "__version__", None)
+    except Exception:  # noqa: BLE001
+        nncf_version = None
+
     ov_opts = ov_config["openvino"]
     batches = batches or [int(b) for b in ov_opts["batches"]]
-    paths = ArtifactPaths.for_checkpoint(checkpoint)
+    ckpt = resolve_checkpoint_dir(checkpoint)
+    paths = ArtifactPaths.for_checkpoint(ckpt)
     paths.root.mkdir(parents=True, exist_ok=True)
 
-    net, config, charset = build_keras_net(checkpoint)
+    net, config, charset = build_keras_net(ckpt)
     seed = int(config.get("project", {}).get("seed", 42))
+    pp = config.get("preprocess", {})
+    pad_value = imagenet_pad_value(pp)
+    wds = int(config.get("model", {}).get("width_downsample", 4))
+    weights_path = checkpoint_weights_path(ckpt)
+    weights_hash = file_sha256(weights_path)
 
     calib_arrays, _ = load_split(
         config,
@@ -104,12 +123,11 @@ def convert_checkpoint(
         max_samples=int(ov_opts["calib_samples"]),
         seed=seed,
     )
-    pad_value = imagenet_pad_value(config.get("preprocess", {}))
     logger.info("Calibration: %d images from split=%s", len(calib_arrays), ov_opts["calib_split"])
 
     variants: list[dict[str, Any]] = []
     for batch in batches:
-        shape = shape_from_checkpoint(checkpoint, batch=batch)
+        shape = shape_from_checkpoint(ckpt, batch=batch)
 
         fp16_model = to_ov_model(net, shape)
         save_ir(fp16_model, paths.model_xml("fp16", batch), compress_to_fp16=True)
@@ -121,19 +139,33 @@ def convert_checkpoint(
 
         variants.append({"batch": batch, "shape": shape.input_shape, "calib_items": n_items})
 
-    # Self-contained deploy assets next to the IR.
-    shutil.copyfile(Path(charset_path(config)), paths.root / "charset.txt")
-    shutil.copyfile(
-        Path(checkpoint).resolve() / "config.yaml", paths.root / "config.yaml"
+    # Self-contained deploy assets next to the IR (charset, LM, config, build_info).
+    save_sidecar_bundle(
+        config,
+        paths.root,
+        source_root=ckpt,
+        openvino_version=ov.__version__,
+        nncf_version=nncf_version,
+        source_checkpoint=ckpt.name,
+        weights_sha256=weights_hash,
     )
 
     meta = {
-        "checkpoint": str(Path(checkpoint).resolve()),
-        "charset": str((paths.root / "charset.txt").resolve()),
+        "source_checkpoint": ckpt.name,
+        "charset": CHARSET_NAME,
+        "num_classes": charset.num_classes,
+        "width_downsample": wds,
+        "input_layout": "NHWC",
+        "normalize": pp.get("normalize"),
+        "pad_value": pad_value,
+        "weights_sha256": weights_hash,
+        "weights_file": WEIGHTS_NAME,
         "openvino_version": ov.__version__,
+        "nncf_version": nncf_version,
         "batches": batches,
         "precision_out": list(ov_opts.get("precision_out", ["fp16", "int8"])),
         "variants": variants,
+        "default_decode": "beam_lm",
     }
     _write_meta(paths.meta_path, meta)
 
@@ -151,7 +183,7 @@ def _accuracy_sanity_check(
     ov_opts: dict[str, Any],
     seed: int,
 ) -> dict[str, Any]:
-    """Quick greedy-CER FP16 vs INT8 on batch-1 IRs; flags large drops."""
+    """Quick CER FP16 vs INT8 on batch-1 IRs; flags large drops."""
     n = min(64, int(ov_opts["calib_samples"]))
     arrays, texts = load_split(
         config, split=str(ov_opts["calib_split"]), max_samples=n, seed=seed

@@ -1,7 +1,7 @@
 """OCR model loading + inference for the GTK GUI (no GI imports).
 
-Loads a checkpoint directory ``{model.weights.h5, config.yaml}`` and prefers
-``beam_lm`` decoding when KenLM artifacts are present.
+Loads a self-contained checkpoint directory and prefers ``beam_lm`` decoding
+when ``lm/vi.binary`` is present in the checkpoint.
 """
 
 from __future__ import annotations
@@ -20,22 +20,23 @@ from vie_handwritten.eval import character_error_rate, word_error_rate
 from vie_handwritten.model import OCRModel
 from vie_handwritten.preprocess import load_image, preprocess
 from vie_handwritten.utils import (
+    ARTIFACT_LM_BINARY_REL,
+    ARTIFACT_LM_LEXICON_REL,
+    ARTIFACT_LM_UNIGRAMS_REL,
     CHECKPOINT_CONFIG_NAME,
     WEIGHTS_NAME,
-    abs_path,
+    artifact_has_lm,
     configure_runtime,
     load_checkpoint_config,
     project_root,
+    resolve_artifact_path,
     resolve_checkpoint_dir,
+    resolve_ctc_paths,
 )
 
 logger = logging.getLogger(__name__)
 
 IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff")
-
-_LM_PATH = "lm/vi.binary"
-_UNIGRAMS_PATH = "lm/unigrams.txt"
-_LEXICON_PATH = "data/charset/vi_syllables.txt"
 
 
 def list_images(folder: str | Path) -> list[Path]:
@@ -106,31 +107,40 @@ def compare_prediction(reference: str, hypothesis: str) -> dict[str, Any]:
     }
 
 
-def _prepare_config(config: dict[str, Any]) -> tuple[dict[str, Any], str]:
-    """Force ``beam_lm`` when LM files exist; otherwise fall back to ``greedy``.
+def _prepare_config(
+    config: dict[str, Any], checkpoint: str | Path
+) -> tuple[dict[str, Any], str]:
+    """Force ``beam_lm`` when LM files exist in the checkpoint; else greedy.
 
     Returns ``(config, note)`` where ``note`` explains any fallback.
     """
+    root = Path(checkpoint)
+    config = resolve_ctc_paths(config, root)
     ctc = config.setdefault("ctc", {})
-    lm = abs_path(ctc.get("lm_path") or _LM_PATH)
-    unigrams = abs_path(ctc.get("unigrams_path") or _UNIGRAMS_PATH)
-    lexicon = abs_path(ctc.get("lexicon_path") or _LEXICON_PATH)
+    # Ensure relative defaults resolve inside the artifact if not already set.
+    for key, rel in (
+        ("lm_path", ARTIFACT_LM_BINARY_REL),
+        ("unigrams_path", ARTIFACT_LM_UNIGRAMS_REL),
+        ("lexicon_path", ARTIFACT_LM_LEXICON_REL),
+    ):
+        if not ctc.get(key):
+            ctc[key] = str(resolve_artifact_path(root, rel))
+        else:
+            ctc[key] = str(resolve_artifact_path(root, ctc[key]))
 
-    ctc["lm_path"] = str(lm)
-    ctc["unigrams_path"] = str(unigrams)
-    ctc["lexicon_path"] = str(lexicon)
     ctc.setdefault("beam_width", 100)
     ctc.setdefault("alpha", 0.5)
     ctc.setdefault("beta", 1.0)
 
     note = ""
-    if lm.is_file():
+    lm = Path(ctc["lm_path"])
+    if artifact_has_lm(root) or lm.is_file():
         ctc["decode"] = "beam_lm"
         if int(ctc.get("beam_width", 10)) < 50:
             ctc["beam_width"] = 100
     else:
         ctc["decode"] = "greedy"
-        note = f"LM missing ({lm}); using greedy decode"
+        note = f"LM missing in checkpoint ({root / ARTIFACT_LM_BINARY_REL}); using greedy decode"
         logger.warning(note)
     return config, note
 
@@ -200,7 +210,7 @@ class ModelService:
     def load(self, checkpoint: str | Path) -> dict[str, Any]:
         """Load a checkpoint directory (blocking). Prefer calling from a worker thread."""
         root = resolve_checkpoint_dir(checkpoint)
-        config, note = _prepare_config(load_checkpoint_config(root))
+        config, note = _prepare_config(load_checkpoint_config(root), root)
 
         self._runtime = configure_runtime()
         self._runtime["gpu_names"] = _gpu_display_names()

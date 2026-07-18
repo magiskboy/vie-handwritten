@@ -1,16 +1,17 @@
-"""TF-free CTC greedy decode + Vietnamese normalization.
+"""TF-free CTC decode + Vietnamese normalization for the OpenVINO deploy path.
 
-The deploy path must not import TensorFlow, so this module reimplements the
-NumPy-only greedy CTC decode and mirrors the Vietnamese cleanup done in
-:mod:`vie_handwritten.postprocess` (Underthesea ``text_normalize`` + whitespace /
-punctuation tidy) without pulling in the TF-bound module.
+Supports greedy and KenLM ``beam_lm`` (default when LM artifacts are present)
+without importing TensorFlow. Mirrors ``vie_handwritten.postprocess`` cleanup.
 """
 
 from __future__ import annotations
 
+import logging
 import re
 import unicodedata
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 def greedy_ctc(logits: Any, *, blank_index: int = 0) -> list[list[int]]:
@@ -66,38 +67,88 @@ def normalize_vi(
     return re.sub(r"\s+", " ", text).strip()
 
 
-class GreedyDecoder:
-    """Charset-aware greedy decoder: logits ``(B, T, C)`` -> normalized text."""
+class ArtifactDecoder:
+    """Charset-aware decoder: logits ``(B, T, C)`` -> normalized text.
+
+    Defaults to ``beam_lm`` when an LM decoder can be built; falls back to greedy.
+    """
 
     def __init__(
         self,
         charset: Any,
         *,
+        method: str = "beam_lm",
         blank_index: int = 0,
+        beam_width: int = 100,
+        lm_decoder: Any = None,
+        token_min_logp: float = -5.0,
+        beam_prune_logp: float = -10.0,
         nfc: bool = True,
         underthesea: bool = True,
         underthesea_tokenizer: str = "regex",
     ):
         self.charset = charset
+        self.method = method
         self.blank_index = blank_index
+        self.beam_width = beam_width
+        self.lm_decoder = lm_decoder
+        self.token_min_logp = token_min_logp
+        self.beam_prune_logp = beam_prune_logp
         self.nfc = nfc
         self.underthesea = underthesea
         self.underthesea_tokenizer = underthesea_tokenizer
 
     @classmethod
-    def from_config(cls, charset: Any, config: dict[str, Any]) -> "GreedyDecoder":
+    def from_config(
+        cls,
+        charset: Any,
+        config: dict[str, Any],
+        *,
+        prefer_beam_lm: bool = True,
+    ) -> "ArtifactDecoder":
+        """Build decoder; OpenVINO path defaults to ``beam_lm`` when LM is available."""
+        from vie_handwritten.lm_decode import build_lm_decoder
+
+        ctc = config.get("ctc", {})
         pp = config.get("postprocess", {})
+        method = "beam_lm" if prefer_beam_lm else str(ctc.get("decode", "greedy"))
+        lm_decoder = None
+        if method == "beam_lm":
+            try:
+                lm_decoder = build_lm_decoder(charset, ctc)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("beam_lm unavailable (%s); falling back to greedy", exc)
+                method = "greedy"
+        beam_width = int(ctc.get("beam_width", 100 if method == "beam_lm" else 10))
+        if method == "beam_lm" and beam_width < 50:
+            beam_width = 100
         return cls(
             charset,
-            blank_index=int(config.get("ctc", {}).get("blank_index", 0)),
+            method=method,
+            blank_index=int(ctc.get("blank_index", 0)),
+            beam_width=beam_width,
+            lm_decoder=lm_decoder,
+            token_min_logp=float(ctc.get("token_min_logp", -5.0)),
+            beam_prune_logp=float(ctc.get("beam_prune_logp", -10.0)),
             nfc=bool(pp.get("nfc", True)),
             underthesea=bool(pp.get("underthesea", True)),
             underthesea_tokenizer=str(pp.get("underthesea_tokenizer", "regex")),
         )
 
     def decode(self, logits: Any) -> list[str]:
-        paths = greedy_ctc(logits, blank_index=self.blank_index)
-        raw = [str(self.charset.decode(p, join=True)) for p in paths]
+        from vie_handwritten.lm_decode import ctc_lm_decode
+
+        if self.method == "beam_lm" and self.lm_decoder is not None:
+            raw = ctc_lm_decode(
+                logits,
+                self.lm_decoder,
+                beam_width=self.beam_width,
+                token_min_logp=self.token_min_logp,
+                beam_prune_logp=self.beam_prune_logp,
+            )
+        else:
+            paths = greedy_ctc(logits, blank_index=self.blank_index)
+            raw = [str(self.charset.decode(p, join=True)) for p in paths]
         return [
             normalize_vi(
                 text,
@@ -107,3 +158,7 @@ class GreedyDecoder:
             )
             for text in raw
         ]
+
+
+# Back-compat alias used by older imports.
+GreedyDecoder = ArtifactDecoder

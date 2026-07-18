@@ -33,7 +33,7 @@ def build_parser() -> argparse.ArgumentParser:
     train_p.add_argument(
         "--resume",
         default=None,
-        help="Checkpoint directory ({model.weights.h5, config.yaml}) to resume from",
+        help="Self-contained checkpoint dir (weights, config, charset, build_info, lm/)",
     )
     train_p.add_argument("--rebuild-data", action="store_true", help="Rebuild manifests first")
 
@@ -46,7 +46,7 @@ def build_parser() -> argparse.ArgumentParser:
     eval_p.add_argument(
         "--checkpoint",
         required=True,
-        help="Checkpoint directory containing model.weights.h5 and config.yaml",
+        help="Self-contained checkpoint dir (weights, config, charset, build_info, lm/)",
     )
     eval_p.add_argument("--split", default="test", choices=["train", "val", "test"])
     eval_p.add_argument("--max-samples", type=int, default=None)
@@ -62,7 +62,7 @@ def build_parser() -> argparse.ArgumentParser:
     infer_p.add_argument(
         "--checkpoint",
         required=True,
-        help="Checkpoint directory containing model.weights.h5 and config.yaml",
+        help="Self-contained checkpoint dir (weights, config, charset, build_info, lm/)",
     )
     infer_p.add_argument(
         "--decode",
@@ -75,7 +75,7 @@ def build_parser() -> argparse.ArgumentParser:
     tune_p.add_argument(
         "--checkpoint",
         required=True,
-        help="Checkpoint directory containing model.weights.h5 and config.yaml",
+        help="Self-contained checkpoint dir (weights, config, charset, build_info, lm/)",
     )
     tune_p.add_argument("--split", default="val", choices=["train", "val", "test"])
     tune_p.add_argument("--max-samples", type=int, default=300)

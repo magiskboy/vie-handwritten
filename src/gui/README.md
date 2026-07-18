@@ -27,7 +27,7 @@ uv run python -m gui
 
 ## Usage
 
-1. **Load Model** — pick a checkpoint directory containing `model.weights.h5` + `config.yaml`. Decode defaults to `beam_lm` when `lm/vi.binary` exists; otherwise falls back to `greedy`.
+1. **Load Model** — pick a self-contained checkpoint directory (`model.weights.h5`, `config.yaml`, `charset.txt`, `build_info.yaml`, and `lm/` when available). Decode defaults to `beam_lm` when `lm/vi.binary` is in the checkpoint; otherwise falls back to `greedy`.
 2. **Load Images** — pick a directory of line images (`.jpg`, `.png`, …). If the folder has `label.json`, the UI compares Pred vs GT (Levenshtein / CER / WER).
 3. Click an image in the left list to preview and run OCR. Results (and latency) are cached per image.
 

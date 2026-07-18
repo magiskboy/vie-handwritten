@@ -48,10 +48,11 @@ configs/default.yaml      # cấu hình train / build-data (không dùng khi inf
 screenshots/              # ảnh chụp GUI
 src/vie_handwritten/
   cli.py          # entry point `vie-ocr` (build-data/train/build-lm/evaluate/infer/tune-lm)
-  utils.py        # config I/O, checkpoint helpers, seed, paths, GPU runtime
+  utils.py        # config I/O, self-contained checkpoint/OV artifact bundles
   charset.py      # bảng ký tự ↔ index
   preprocess.py   # OpenCV + scikit-image (ảnh → tensor)
   postprocess.py  # CTC decode + Underthesea/local chuẩn hoá tiếng Việt; lớp CTCDecoder
+  lm_decode.py    # TF-free KenLM + pyctcdecode (dùng chung Keras / OpenVINO)
   dataset.py      # discovery + manifest + tf.data (line only)
   model.py        # ResNet-18 → BiLSTM → Linear + lớp composition OCRModel (net + postprocess)
   trainer.py      # CTC loss + OCRTrainer + DecodeMetrics + train 2 phase
@@ -59,6 +60,7 @@ src/vie_handwritten/
   kenlm.py        # train KenLM n-gram LM từ transcript tập train
   tune.py         # grid-search alpha/beta trên val
 src/gui/                  # GTK4 + libadwaita viewer (`vie-ocr-gui`)
+src/converter/            # Keras → OpenVINO IR + TF-free deploy runtime
 ```
 
 Chạy CLI qua `make <target>`, hoặc trực tiếp `vie-ocr <command>` /
@@ -78,21 +80,37 @@ make sync          # = uv sync (khuyến nghị)
 
 ```bash
 make build-data
-make train                                    # → checkpoints/{model.weights.h5, config.yaml}
-make evaluate CKPT=checkpoints SPLIT=test
-make infer IMAGE=path/to/line.png CKPT=checkpoints
+make train                                    # → self-contained checkpoints/<name>/
+make evaluate CKPT=checkpoints/<name> SPLIT=test
+make infer IMAGE=path/to/line.png CKPT=checkpoints/<name>
 ```
 
-Checkpoint là **thư mục** chuẩn: `model.weights.h5` + `config.yaml` (copy config train).
+Checkpoint là **thư mục self-contained**:
+
+```
+checkpoints/<name>/
+  model.weights.h5
+  config.yaml          # paths rewritten relative to this dir
+  charset.txt
+  build_info.yaml
+  lm/                  # copied when source LM files exist
+    vi.binary
+    unigrams.txt
+    vi_syllables.txt
+```
+
 `evaluate` / `infer` / GUI chỉ load từ thư mục đó — không dùng `configs/*.yaml`.
 
+OpenVINO artifact (sau `vie-ov convert`) tương tự, dưới `<checkpoint>/openvino/` thêm
+`meta.yaml` và các IR `fp16_b*/`, `int8_b*/`; decode mặc định là `beam_lm`.
+
 Tương đương khi không dùng make: `vie-ocr build-data`,
-`vie-ocr evaluate --checkpoint checkpoints --split test`, ...
+`vie-ocr evaluate --checkpoint checkpoints/<name> --split test`, ...
 
 ## GUI (GTK4 + libadwaita)
 
-Viewer desktop: chọn thư mục checkpoint (`model.weights.h5` + `config.yaml`), duyệt folder
-ảnh dòng, nhận dạng realtime (beam_lm khi có KenLM), so sánh Pred ↔ GT nếu folder có
+Viewer desktop: chọn thư mục checkpoint self-contained, duyệt folder
+ảnh dòng, nhận dạng realtime (beam_lm khi có KenLM trong checkpoint), so sánh Pred ↔ GT nếu folder có
 `label.json` (Levenshtein / CER / WER), hiển thị GPU và latency (ms).
 
 ```bash
@@ -116,9 +134,9 @@ Chi tiết: [`src/gui/README.md`](src/gui/README.md).
   (`train.phase1.max_train_samples`) để head hội tụ nhanh, LR `1e-3`.
 - **Phase 2** — mở băng toàn bộ, train cả CNN + BiLSTM trên **toàn bộ** dữ liệu, LR `1e-4`.
 
-Cả hai pha dùng chung thư mục `checkpoints/` với `model.weights.h5` (theo `val_loss`
-thấp nhất) và `config.yaml`. Mỗi pha là một lượt `model.fit` trên dataset hữu hạn
-(1 epoch = 1 lượt qua dữ liệu).
+Cả hai pha dùng chung một thư mục checkpoint self-contained; `model.weights.h5` theo
+`val_loss` thấp nhất, kèm `config.yaml` / `charset.txt` / `build_info.yaml` / `lm/`.
+Mỗi pha là một lượt `model.fit` trên dataset hữu hạn (1 epoch = 1 lượt qua dữ liệu).
 
 ## Debug quá trình training (overfit tập nhỏ)
 

@@ -27,6 +27,7 @@ from vie_handwritten.utils import (
     charset_path,
     load_checkpoint_config,
     resolve_checkpoint_dir,
+    resolve_ctc_paths,
 )
 
 logger = logging.getLogger(__name__)
@@ -243,7 +244,10 @@ class OCRModel:
         config: dict[str, Any] | None = None,
         decode: str | None = None,
     ) -> "OCRModel":
-        """Load from a checkpoint directory ``{model.weights.h5, config.yaml}``.
+        """Load from a self-contained checkpoint directory.
+
+        Required: ``model.weights.h5``, ``config.yaml``, ``charset.txt``,
+        ``build_info.yaml`` (and ``lm/`` when using ``beam_lm``).
 
         ``config`` is the already-loaded checkpoint config (optional); ``decode``
         overrides ``ctc.decode`` at runtime.
@@ -252,7 +256,8 @@ class OCRModel:
         cfg = dict(config) if config is not None else load_checkpoint_config(root)
         if decode is not None:
             cfg = {**cfg, "ctc": {**cfg.get("ctc", {}), "decode": decode}}
-        charset = Charset.from_file(charset_path(cfg))
+        cfg = resolve_ctc_paths(cfg, root)
+        charset = Charset.from_file(charset_path(cfg, artifact_root=root))
         net = build_crnn(cfg, num_classes=charset.num_classes)
         load_crnn_weights(net, root / WEIGHTS_NAME)
         decoder = CTCDecoder.from_config(charset, cfg)

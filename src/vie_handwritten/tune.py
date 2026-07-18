@@ -18,7 +18,13 @@ from vie_handwritten.eval import evaluate_corpus
 from vie_handwritten.model import build_crnn, load_crnn_weights
 from vie_handwritten.postprocess import build_lm_decoder, ctc_lm_decode, normalize_text
 from vie_handwritten.preprocess import load_image, preprocess
-from vie_handwritten.utils import charset_path, checkpoint_weights_path, load_checkpoint_config
+from vie_handwritten.utils import (
+    charset_path,
+    checkpoint_weights_path,
+    load_checkpoint_config,
+    resolve_checkpoint_dir,
+    resolve_ctc_paths,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -35,18 +41,19 @@ def tune_lm(
     betas: Sequence[float] = DEFAULT_BETAS,
 ) -> dict[str, Any]:
     """Sweep (alpha, beta) on ``split`` and return per-point + best CER/WER."""
-    config = load_checkpoint_config(checkpoint)
+    root = resolve_checkpoint_dir(checkpoint)
+    config = resolve_ctc_paths(load_checkpoint_config(root), root)
     ctc_cfg = config.setdefault("ctc", {})
     ctc_cfg["decode"] = "beam_lm"
     pp_cfg = config.get("postprocess", {})
-    charset = Charset.from_file(charset_path(config))
+    charset = Charset.from_file(charset_path(config, artifact_root=root))
 
     records = load_manifest(ensure_manifests(config)[split])
     if max_samples and len(records) > max_samples:
         records = records[:max_samples]
 
     crnn = build_crnn(config, num_classes=charset.num_classes)
-    load_crnn_weights(crnn, checkpoint_weights_path(checkpoint))
+    load_crnn_weights(crnn, checkpoint_weights_path(root))
 
     logger.info("Caching logits for %d %s samples ...", len(records), split)
     cached = []  # (logits[1, T, C], ref)

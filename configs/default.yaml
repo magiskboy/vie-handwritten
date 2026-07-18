@@ -60,7 +60,6 @@ train:
   optimizer: adam
   grad_clipnorm: 5.0            # dập gradient spike từ dòng dài (CTC/RNN)
   checkpoint_dir: checkpoints
-  report_dir: reports
   log_dir: runs
   early_stopping_patience: 10
   reduce_lr_patience: 5

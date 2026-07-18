@@ -31,7 +31,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
 }
 
-# Default IR sub-directory under a checkpoint (see plan artifact layout).
+# Default IR sub-directory under a checkpoint. Sidecars live at the ov root:
+# charset.txt, config.yaml, meta.yaml, build_info.yaml, lm/, <precision>_b<batch>/.
 OPENVINO_SUBDIR = "openvino"
 META_NAME = "meta.yaml"
 

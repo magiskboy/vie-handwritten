@@ -2,12 +2,19 @@
 
 Loads a static-shape IR (``fp16``/``int8``, batch 1 or 16), runs it on CPU, and
 turns logits into text. Depends only on ``openvino`` + NumPy (+ OpenCV/underthesea
-via preprocess/decode) - never TensorFlow or Keras.
+via preprocess/decode) — never TensorFlow or Keras.
 
 Static shape means every image is right-padded to width ``W`` before inference;
 each sample's logits are trimmed back to ``ceil(true_width / width_downsample)``
 so padded columns cannot leak into the CTC decode (mirrors training's
 ``input_length``).
+
+OpenVINO artifact layout (self-contained):
+
+  <ov_dir>/
+    charset.txt, config.yaml, meta.yaml, build_info.yaml
+    lm/…  (when available; decode defaults to beam_lm)
+    <precision>_b<batch>/model.xml|.bin
 """
 
 from __future__ import annotations
@@ -20,15 +27,23 @@ import numpy as np
 import yaml
 
 from vie_handwritten.charset import Charset
-from vie_handwritten.utils import charset_path, load_config
+from vie_handwritten.utils import (
+    BUILD_INFO_NAME,
+    CHARSET_NAME,
+    CHECKPOINT_CONFIG_NAME,
+    load_config,
+    resolve_ctc_paths,
+)
 
 from converter.config import ArtifactPaths, META_NAME
-from converter.decode import GreedyDecoder
+from converter.decode import ArtifactDecoder
 
 logger = logging.getLogger(__name__)
 
 _IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
 _IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+
+_OV_REQUIRED = (CHARSET_NAME, CHECKPOINT_CONFIG_NAME, META_NAME, BUILD_INFO_NAME)
 
 
 def imagenet_pad_value(preprocess_cfg: dict[str, Any]) -> float:
@@ -52,8 +67,21 @@ def pad_width(arr: np.ndarray, width: int, pad_value: float) -> np.ndarray:
     return out
 
 
+def resolve_openvino_dir(ov_dir: str | Path) -> Path:
+    """Validate a self-contained OpenVINO artifact directory."""
+    root = Path(ov_dir)
+    if not root.is_dir():
+        raise FileNotFoundError(f"OpenVINO dir must be a directory: {ov_dir}")
+    missing = [name for name in _OV_REQUIRED if not (root / name).is_file()]
+    if missing:
+        raise FileNotFoundError(
+            f"OpenVINO artifact {root} is incomplete; missing: {', '.join(missing)}"
+        )
+    return root.resolve()
+
+
 class OpenVINOCR:
-    """Compiled OpenVINO CRNN + greedy decoder, batch-fixed, CPU-only."""
+    """Compiled OpenVINO CRNN + decoder (default beam_lm), batch-fixed, CPU-only."""
 
     def __init__(
         self,
@@ -65,6 +93,7 @@ class OpenVINOCR:
         height: int,
         width: int,
         width_downsample: int,
+        decoder: ArtifactDecoder | None = None,
     ):
         self.compiled_model = compiled_model
         self.charset = charset
@@ -74,7 +103,9 @@ class OpenVINOCR:
         self.width = width
         self.width_downsample = width_downsample
         self.pad_value = imagenet_pad_value(config.get("preprocess", {}))
-        self.decoder = GreedyDecoder.from_config(charset, config)
+        self.decoder = decoder or ArtifactDecoder.from_config(
+            charset, config, prefer_beam_lm=True
+        )
         self._output = compiled_model.output(0)
 
     @classmethod
@@ -89,14 +120,20 @@ class OpenVINOCR:
         """Load a compiled model from ``<ov_dir>/<precision>_b<batch>/model.xml``."""
         import openvino as ov
 
-        paths = ArtifactPaths.for_dir(ov_dir)
+        root = resolve_openvino_dir(ov_dir)
+        paths = ArtifactPaths.for_dir(root)
         xml = paths.model_xml(precision, batch)
         if not xml.is_file():
             raise FileNotFoundError(f"IR not found: {xml}")
 
         meta = cls._load_meta(paths.meta_path)
-        config = cls._resolve_config(meta, ov_dir)
-        charset = Charset.from_file(cls._resolve_charset(meta, config))
+        config = resolve_ctc_paths(load_config(root / CHECKPOINT_CONFIG_NAME), root)
+        charset = Charset.from_file(root / CHARSET_NAME)
+
+        if meta.get("num_classes") is not None and int(meta["num_classes"]) != charset.num_classes:
+            raise ValueError(
+                f"Charset num_classes={charset.num_classes} != meta.num_classes={meta['num_classes']}"
+            )
 
         pp = config.get("preprocess", {})
         height = int(pp.get("target_height", 64))
@@ -106,7 +143,14 @@ class OpenVINOCR:
         core = ov.Core()
         model = core.read_model(str(xml))
         compiled = core.compile_model(model, device)
-        logger.info("Loaded OpenVINO IR %s on %s (batch=%d)", xml, device, batch)
+        decoder = ArtifactDecoder.from_config(charset, config, prefer_beam_lm=True)
+        logger.info(
+            "Loaded OpenVINO IR %s on %s (batch=%d, decode=%s)",
+            xml,
+            device,
+            batch,
+            decoder.method,
+        )
         return cls(
             compiled,
             charset=charset,
@@ -115,6 +159,7 @@ class OpenVINOCR:
             height=height,
             width=width,
             width_downsample=wds,
+            decoder=decoder,
         )
 
     @staticmethod
@@ -123,28 +168,6 @@ class OpenVINOCR:
             with meta_path.open(encoding="utf-8") as fh:
                 return yaml.safe_load(fh) or {}
         return {}
-
-    @staticmethod
-    def _resolve_config(meta: dict[str, Any], ov_dir: str | Path) -> dict[str, Any]:
-        # Prefer a config.yaml copied next to the IR; else the source checkpoint's.
-        local = Path(ov_dir) / "config.yaml"
-        if local.is_file():
-            return load_config(local)
-        src = meta.get("checkpoint")
-        if src:
-            cfg_path = Path(src) / "config.yaml"
-            if cfg_path.is_file():
-                return load_config(cfg_path)
-        raise FileNotFoundError(
-            f"No config.yaml beside IR ({local}) or at checkpoint in {META_NAME}"
-        )
-
-    @staticmethod
-    def _resolve_charset(meta: dict[str, Any], config: dict[str, Any]) -> Path:
-        cs = meta.get("charset")
-        if cs and Path(cs).is_file():
-            return Path(cs)
-        return charset_path(config)
 
     def _run_batch(self, batch_arr: np.ndarray) -> np.ndarray:
         """Run one full padded batch ``(B, H, W, C)`` -> logits ``(B, T, C)``."""
