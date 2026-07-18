@@ -11,7 +11,6 @@ Architecture:
 from __future__ import annotations
 
 import logging
-import re
 from pathlib import Path
 from typing import Any
 
@@ -26,9 +25,14 @@ from vie_handwritten.utils import (
     WEIGHTS_NAME,
     charset_path,
     load_checkpoint_config,
+    project_root,
     resolve_checkpoint_dir,
     resolve_ctc_paths,
 )
+
+# Vendored ImageNet ResNet-18 weights (our HTR backbone layer names). See
+# third_party/resnet_18_imagenet/SOURCE.md for upstream provenance.
+IMAGENET_BACKBONE_WEIGHTS = Path("third_party/resnet_18_imagenet/backbone.weights.h5")
 
 logger = logging.getLogger(__name__)
 
@@ -40,8 +44,8 @@ logger = logging.getLogger(__name__)
 # (T ≈ width / WIDTH_DOWNSAMPLE); the dataset uses it to derive ``input_length``.
 WIDTH_DOWNSAMPLE = 4
 
-# Match keras_hub ResNet so transferred ImageNet moving stats stay valid under our
-# forward pass (Keras BatchNormalization defaults are momentum=0.99, epsilon=1e-3).
+# Match keras_hub ResNet BN so transferred ImageNet moving stats stay valid under
+# our forward pass (Keras BatchNormalization defaults are momentum=0.99, epsilon=1e-3).
 _BN_MOMENTUM = 0.9
 _BN_EPSILON = 1e-5
 
@@ -51,6 +55,13 @@ def _bn(name: str) -> layers.BatchNormalization:
 
 
 def _basic_block(x, filters: int, *, strides: tuple[int, int] = (1, 1), name: str):
+    """One ResNet basic block. ``name`` is ``layer{L}_block{B}`` (1-based).
+
+    Weighted layers (must stay stable — vendored ImageNet ``.h5`` keys off these):
+      {name}_conv1, {name}_bn1, {name}_conv2, {name}_bn2
+      {name}_proj_conv, {name}_proj_bn   # only when stride≠(1,1) or channel change
+    Non-weighted: {name}_relu1, {name}_add, {name}_out.
+    """
     shortcut = x
     y = layers.Conv2D(filters, 3, strides=strides, padding="same", use_bias=False, name=f"{name}_conv1")(x)
     y = _bn(f"{name}_bn1")(y)
@@ -72,6 +83,27 @@ def build_cnn_backbone(input_tensor):
     Width is downsampled only by the stem (stem_conv ·2, stem_pool ·2); layer2/3/4
     keep width-stride 1 so CTC retains enough time steps. Height is still downsampled
     by layer2 (2,2) and layer3 (2,1). See ``WIDTH_DOWNSAMPLE``.
+
+    Layer-name convention (this project; used by vendored ImageNet weights)::
+
+        stem_conv, stem_bn, stem_relu, stem_pool
+        layer{L}_block{B}_{conv1|bn1|relu1|conv2|bn2|proj_conv|proj_bn|add|out}
+
+    where L ∈ {1..4}, B ∈ {1, 2} for ResNet-18. Indexing is **1-based**.
+
+    keras_hub ``ResNetBackbone`` (basic block) uses 0-based stacks/blocks and
+    different suffixes — map when dumping a new preset::
+
+        stem_conv / stem_bn  ←  conv1_conv / conv1_bn
+        layer{L}_block{B}_conv1     ←  stack{L-1}_block{B-1}_1_conv
+        layer{L}_block{B}_bn1       ←  stack{L-1}_block{B-1}_1_bn
+        layer{L}_block{B}_conv2     ←  stack{L-1}_block{B-1}_2_conv
+        layer{L}_block{B}_bn2       ←  stack{L-1}_block{B-1}_2_bn
+        layer{L}_block{B}_proj_conv ←  stack{L-1}_block{B-1}_0_conv
+        layer{L}_block{B}_proj_bn   ←  stack{L-1}_block{B-1}_0_bn
+
+    Match by *name*, not weight order: hub interleaves projection weights inside
+    downsample blocks. Full provenance: ``third_party/resnet_18_imagenet/SOURCE.md``.
     """
     x = layers.Conv2D(64, 7, strides=(2, 2), padding="same", use_bias=False, name="stem_conv")(input_tensor)
     x = _bn("stem_bn")(x)
@@ -92,69 +124,26 @@ def build_cnn_backbone(input_tensor):
     return x
 
 
-def _hub_layer_name(custom_name: str) -> str | None:
-    """Map a layer name in our backbone → the matching keras_hub ResNet-18 layer.
-
-    Mapping is derived from the official keras_hub ``ResNetBackbone`` source (basic
-    block): the stem is ``conv1_{conv,bn}``; each residual block ``stack{s}_block{b}``
-    names its main path ``_1_*`` / ``_2_*`` and its projection shortcut ``_0_*``.
-    Our ``layer{L}`` (1-based) corresponds to hub ``stack{L-1}`` and ``block{B}``
-    (1-based) to hub ``block{B-1}``.
-
-    Matching by *name* (not by weight order) is required because keras_hub emits a
-    downsample block's weights interleaved (``_1_conv, _1_bn, _0_conv, _2_conv, …``),
-    so a positional ``zip`` silently misaligns tensors of equal shape.
-    """
-    if custom_name == "stem_conv":
-        return "conv1_conv"
-    if custom_name == "stem_bn":
-        return "conv1_bn"
-    m = re.match(r"layer(\d+)_block(\d+)_(conv1|bn1|conv2|bn2|proj_conv|proj_bn)$", custom_name)
-    if not m:
-        return None
-    stack, block = int(m.group(1)) - 1, int(m.group(2)) - 1
-    suffix = {
-        "conv1": "1_conv",
-        "bn1": "1_bn",
-        "conv2": "2_conv",
-        "bn2": "2_bn",
-        "proj_conv": "0_conv",
-        "proj_bn": "0_bn",
-    }[m.group(3)]
-    return f"stack{stack}_block{block}_{suffix}"
+def _imagenet_backbone_weights_path() -> Path:
+    """Absolute path to the vendored ImageNet backbone weights file."""
+    return project_root() / IMAGENET_BACKBONE_WEIGHTS
 
 
 def _load_imagenet_weights(backbone: keras.Model) -> None:
-    """Transfer ImageNet weights from keras_hub ResNet-18, matched by layer name.
+    """Load ImageNet ResNet-18 weights from the vendored on-disk checkpoint.
 
-    Every weighted layer must map and have identical shapes, otherwise we raise so a
-    silent partial/misaligned transfer can never corrupt the backbone.
+    Weights were transferred once from keras_hub ``resnet_18_imagenet`` onto this
+    backbone's layer names and committed under ``third_party/resnet_18_imagenet/``.
+    No network access is required.
     """
-    import keras_hub
-
-    logger.info("Loading keras_hub ResNetBackbone preset resnet_18_imagenet …")
-    pretrained = keras_hub.models.ResNetBackbone.from_preset("resnet_18_imagenet")
-    hub_layers = {layer.name: layer for layer in pretrained.layers}
-
-    transferred = 0
-    weighted = [layer for layer in backbone.layers if layer.weights]
-    unmatched: list[str] = []
-    for layer in weighted:
-        hub_name = _hub_layer_name(layer.name)
-        src = hub_layers.get(hub_name) if hub_name else None
-        if src is None:
-            unmatched.append(layer.name)
-            continue
-        dst_w, src_w = layer.get_weights(), src.get_weights()
-        if len(dst_w) != len(src_w) or any(d.shape != s.shape for d, s in zip(dst_w, src_w)):
-            unmatched.append(f"{layer.name}→{hub_name}(shape)")
-            continue
-        layer.set_weights(src_w)
-        transferred += 1
-
-    logger.info("Transferred %d / %d weighted backbone layers from ImageNet", transferred, len(weighted))
-    if unmatched:
-        raise RuntimeError(f"ImageNet transfer incomplete; unmatched layers: {unmatched}")
+    path = _imagenet_backbone_weights_path()
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"Vendored ImageNet weights not found: {path}. "
+            "Expected third_party/resnet_18_imagenet/backbone.weights.h5 in the repo."
+        )
+    logger.info("Loading ImageNet ResNet-18 backbone weights from %s …", path)
+    backbone.load_weights(str(path))
 
 
 class MapToSequence(layers.Layer):

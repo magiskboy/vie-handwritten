@@ -6,7 +6,6 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "tensorflow[and-cuda]>=2.19.1",
-    "keras-hub>=0.17",
     "opencv-python>=4.10",
     "scikit-image>=0.24",
     "numpy>=1.26",
@@ -35,7 +34,7 @@ openvino = [
     "nncf>=2.14",
 ]
 
-# kenlm has no PyPI wheel; build the query bindings from the vendored submodule.
+# kenlm has no PyPI wheel; build the query bindings from the vendored source tree.
 [tool.uv.sources]
 kenlm = { path = "third_party/kenlm" }
 

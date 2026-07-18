@@ -10,8 +10,9 @@ Artifacts (under the ``lm/`` dir, derived from ``ctc.lm_path``):
     vi.binary    the trie binary used at decode time
     unigrams.txt corpus tokens union the syllable lexicon (pyctcdecode unigrams)
 
-KenLM binaries are built from the vendored submodule via
+KenLM binaries are built from the vendored source tree via
 ``make build-kenlm``; this module only invokes ``lmplz`` / ``build_binary``.
+See ``third_party/kenlm/SOURCE.md`` for upstream provenance.
 """
 
 from __future__ import annotations
@@ -32,7 +33,7 @@ logger = logging.getLogger(__name__)
 def _kenlm_tools() -> tuple[dict[str, str], Path, Path]:
     """Locate lmplz / build_binary and the env needed to run them.
 
-    Honors ``KENLM_BIN`` (dir of the binaries); defaults to the submodule build.
+    Honors ``KENLM_BIN`` (dir of the binaries); defaults to the vendored build.
     KenLM links system Boost (from ``boost-devel``), so no extra library path
     is needed at runtime.
     """

@@ -18,7 +18,7 @@ help:
 	@echo "  sync         Install/refresh Python deps (uv sync)"
 	@echo "  sync-gui     Install deps including GTK GUI extra (pygobject)"
 	@echo "  sync-demo    Install form-ocr-demo workspace package + openvino"
-	@echo "  build-kenlm  Build KenLM lmplz/build_binary from submodule (needs cmake + boost-devel)"
+	@echo "  build-kenlm  Build KenLM lmplz/build_binary from vendored source (needs cmake + boost-devel)"
 	@echo "  build-lm     Train KenLM syllable LM from train split (ORDER=, PRUNE=)"
 	@echo "  train        Train CRNN, 2 phases (RESUME=checkpoint-dir)"
 	@echo "  train-word   Curriculum stage 1: pretrain trên HWDB_word → checkpoints/word"
@@ -72,7 +72,7 @@ demo-ov: sync-demo
 build-kenlm:
 	@command -v cmake >/dev/null 2>&1 || { echo "cmake not found. Install via package manager (e.g. 'sudo dnf install cmake')."; exit 1; }
 	@test -f /usr/include/boost/version.hpp || { echo "boost-devel not found. Install via package manager (e.g. 'sudo dnf install boost-devel')."; exit 1; }
-	@test -f $(KENLM_DIR)/CMakeLists.txt || { echo "KenLM submodule missing: git submodule update --init --recursive"; exit 1; }
+	@test -f $(KENLM_DIR)/CMakeLists.txt || { echo "KenLM source missing at $(KENLM_DIR) (vendored tree; see $(KENLM_DIR)/SOURCE.md)"; exit 1; }
 	cmake -B $(KENLM_DIR)/build -S $(KENLM_DIR) -DCMAKE_BUILD_TYPE=Release
 	cmake --build $(KENLM_DIR)/build -j$$(nproc) --target lmplz build_binary
 	@echo "Built: $(KENLM_DIR)/build/bin/{lmplz,build_binary}"

@@ -2,7 +2,7 @@
 
 Only the ``convert`` command touches this module; the deploy/runtime path stays
 TF-free. Weights are loaded from the checkpoint and ImageNet pretrained loading is
-skipped (weights are overwritten anyway), so conversion needs no network access.
+skipped (weights are overwritten anyway).
 """
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ def force_cpu() -> None:
 
 
 def build_keras_net(checkpoint: str | Path) -> tuple[Any, dict[str, Any], Charset]:
-    """Load the trained CRNN from a checkpoint dir (no ImageNet download)."""
+    """Load the trained CRNN from a checkpoint dir (skip ImageNet init)."""
     force_cpu()
     from vie_handwritten.model import build_crnn, load_crnn_weights
 

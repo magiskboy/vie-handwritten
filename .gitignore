@@ -32,6 +32,7 @@ checkpoints/*
 runs/
 logs/
 *.h5
+!third_party/resnet_18_imagenet/backbone.weights.h5
 *.keras
 *.pb
 *.onnx
@@ -40,7 +41,7 @@ logs/
 # SpecStory / local agent
 .specstory/
 
-# Third-party build artifacts (KenLM built from submodule against system Boost)
+# Third-party build artifacts (KenLM built from vendored source against system Boost)
 /third_party/kenlm/build/
 
 # Trained language model artifacts (rebuild with `build-lm`)

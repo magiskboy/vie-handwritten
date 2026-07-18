@@ -21,7 +21,7 @@ Train with TensorFlow/Keras, decode with optional KenLM-fused beam search, and d
 
 | Component     | Library                                                   |
 | ------------- | --------------------------------------------------------- |
-| Deep learning | TensorFlow / Keras, keras-hub (ResNet-18)                 |
+| Deep learning | TensorFlow / Keras (ResNet-18 + vendored ImageNet weights) |
 | Images        | `opencv-python` (CLAHE), `scikit-image` (deskew / resize) |
 | Metrics       | `editdistance` (CER / WER)                                |
 | LM decode     | KenLM + `pyctcdecode`                                     |
@@ -52,11 +52,16 @@ Train with TensorFlow/Keras, decode with optional KenLM-fused beam search, and d
 ## Installation
 
 ```bash
-git clone --recursive https://github.com/magiskboy/vie-handwritten.git
+git clone https://github.com/magiskboy/vie-handwritten.git
 cd vie-handwritten
 make sync          # uv sync
 # or: pip install -e ".[dev]"
 ```
+
+Vendored third-party trees (committed in-repo, not submodules):
+
+- `third_party/kenlm/` — [kpu/kenlm](https://github.com/kpu/kenlm) source; see `SOURCE.md`
+- `third_party/resnet_18_imagenet/` — ImageNet ResNet-18 backbone weights; see `SOURCE.md`
 
 Extras:
 
@@ -172,11 +177,10 @@ sudo dnf install cmake boost-devel zlib-devel bzip2-devel xz-devel
 # Debian/Ubuntu
 sudo apt install cmake libboost-all-dev zlib1g-dev libbz2-dev liblzma-dev
 
-git submodule update --init --recursive
 make build-kenlm    # → third_party/kenlm/build/bin/{lmplz,build_binary}
 ```
 
-Python `kenlm` bindings and `pyctcdecode` are installed by `make sync` (bindings build from the submodule).
+Python `kenlm` bindings and `pyctcdecode` are installed by `make sync` (bindings build from the vendored `third_party/kenlm` tree).
 
 ### Train LM and evaluate
 
