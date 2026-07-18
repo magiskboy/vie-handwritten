@@ -27,7 +27,7 @@ class InfoPanel(Gtk.Box):
             (
                 ("checkpoint", "Checkpoint"),
                 ("decode", "Decode"),
-                ("device", "GPU"),
+                ("device", "Device"),
                 ("status", "Status"),
             )
         ):
@@ -60,9 +60,27 @@ class InfoPanel(Gtk.Box):
         if note:
             self._vals["decode"].set_tooltip_text(note)
 
+        backend = str(info.get("backend") or "")
         gpu_names = [n for n in (info.get("gpu_names") or []) if n]
         tf_ver = info.get("tensorflow") or ""
-        if gpu_names:
+        ov_ver = info.get("openvino") or ""
+        precision = info.get("precision") or ""
+
+        if backend == "openvino":
+            label = "CPU · OpenVINO"
+            if precision:
+                label = f"{label} · {precision}"
+            tip_parts = ["OpenVINO (CPU only)"]
+            if precision:
+                tip_parts.append(f"precision={precision}")
+            if info.get("batch") not in ("", None):
+                tip_parts.append(f"batch={info['batch']}")
+            if ov_ver:
+                tip_parts.append(f"OV {ov_ver}")
+            self._vals["device"].set_label(label)
+            self._vals["device"].set_tooltip_text(" · ".join(tip_parts))
+            self._vals["device"].set_ellipsize(Pango.EllipsizeMode.END)
+        elif gpu_names:
             device = gpu_names[0]
             if len(gpu_names) > 1:
                 device = f"{device} (+{len(gpu_names) - 1})"
@@ -74,11 +92,14 @@ class InfoPanel(Gtk.Box):
             self._vals["device"].set_ellipsize(Pango.EllipsizeMode.END)
         else:
             device = f"CPU · TF {tf_ver}" if tf_ver else "CPU"
+            if backend == "keras" and tf_ver:
+                device = f"CPU · Keras · TF {tf_ver}"
             self._vals["device"].set_label(device)
             self._vals["device"].set_tooltip_text("")
 
         if info.get("ready"):
-            self.set_status("Sẵn sàng")
+            backend_label = {"keras": "Keras", "openvino": "OpenVINO"}.get(backend, "")
+            self.set_status(f"Sẵn sàng · {backend_label}" if backend_label else "Sẵn sàng")
         else:
             self.set_status("Chưa load model")
 

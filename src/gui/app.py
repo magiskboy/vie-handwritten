@@ -113,8 +113,8 @@ class MainWindow(Adw.ApplicationWindow):
 
     def _on_load_model(self, _btn: Gtk.Button) -> None:
         dialog = Gtk.FileDialog(
-            title="Chọn thư mục checkpoint (model.weights.h5 + config.yaml)",
-            initial_folder=Gio.File.new_for_path(GLib.get_current_dir())
+            title="Chọn thư mục model (Keras checkpoint hoặc OpenVINO artifact)",
+            initial_folder=Gio.File.new_for_path(GLib.get_current_dir()),
         )
    
         dialog.select_folder(self, None, self._on_model_chosen)
@@ -149,7 +149,14 @@ class MainWindow(Adw.ApplicationWindow):
                 assert info is not None
                 self._info.update(info)
                 note = info.get("decode_note") or ""
-                self.toast("Đã load model" + (f" ({note})" if note else ""))
+                backend = {"keras": "Keras", "openvino": "OpenVINO"}.get(
+                    str(info.get("backend") or ""), "model"
+                )
+                device = str(info.get("device") or "")
+                detail = backend + (f" · {device}" if device else "")
+                if note:
+                    detail = f"{detail}; {note}"
+                self.toast(f"Đã load {detail}")
                 if self._current_image:
                     self._recognize(self._current_image)
                 return False

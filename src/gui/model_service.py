@@ -1,7 +1,11 @@
 """OCR model loading + inference for the GTK GUI (no GI imports).
 
-Loads a self-contained checkpoint directory and prefers ``beam_lm`` decoding
-when ``lm/vi.binary`` is present in the checkpoint.
+Auto-detects artifact format:
+
+* Keras checkpoint (``model.weights.h5`` + sidecars) → TensorFlow/Keras, prefer GPU
+* OpenVINO artifact (``meta.yaml`` + IR sidecars) → OpenVINO, CPU only
+
+Decode defaults to ``beam_lm`` when ``lm/vi.binary`` is present.
 """
 
 from __future__ import annotations
@@ -12,22 +16,24 @@ import threading
 import time
 import unicodedata
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Literal
 
 import editdistance
+import numpy as np
 
 from vie_handwritten.eval import character_error_rate, word_error_rate
-from vie_handwritten.model import OCRModel
 from vie_handwritten.preprocess import load_image, preprocess
 from vie_handwritten.utils import (
     ARTIFACT_LM_BINARY_REL,
     ARTIFACT_LM_LEXICON_REL,
     ARTIFACT_LM_UNIGRAMS_REL,
+    BUILD_INFO_NAME,
     CHECKPOINT_CONFIG_NAME,
     WEIGHTS_NAME,
     artifact_has_lm,
     configure_runtime,
     load_checkpoint_config,
+    load_config,
     project_root,
     resolve_artifact_path,
     resolve_checkpoint_dir,
@@ -37,6 +43,15 @@ from vie_handwritten.utils import (
 logger = logging.getLogger(__name__)
 
 IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff")
+ModelBackend = Literal["keras", "openvino"]
+
+# Preferred OpenVINO IR variants for interactive GUI (latency over throughput).
+_OV_VARIANT_PREFERENCE: tuple[tuple[str, int], ...] = (
+    ("int8", 1),
+    ("fp16", 1),
+    ("int8", 16),
+    ("fp16", 16),
+)
 
 
 def list_images(folder: str | Path) -> list[Path]:
@@ -107,6 +122,28 @@ def compare_prediction(reference: str, hypothesis: str) -> dict[str, Any]:
     }
 
 
+def detect_model_format(path: str | Path) -> ModelBackend:
+    """Detect whether ``path`` is a Keras checkpoint or OpenVINO artifact directory."""
+    root = Path(path)
+    if not root.is_dir():
+        raise FileNotFoundError(f"Model path must be a directory: {path}")
+
+    has_keras = (root / WEIGHTS_NAME).is_file() and (root / CHECKPOINT_CONFIG_NAME).is_file()
+    has_ov = (root / "meta.yaml").is_file() and (root / CHECKPOINT_CONFIG_NAME).is_file()
+
+    if has_ov and not has_keras:
+        return "openvino"
+    if has_keras and not has_ov:
+        return "keras"
+    if has_ov and has_keras:
+        # Prefer OpenVINO when meta.yaml marks a deploy artifact.
+        return "openvino"
+    raise FileNotFoundError(
+        f"Not a Keras checkpoint or OpenVINO artifact: {root} "
+        f"(need {WEIGHTS_NAME} or meta.yaml + {CHECKPOINT_CONFIG_NAME})"
+    )
+
+
 def _prepare_config(
     config: dict[str, Any], checkpoint: str | Path
 ) -> tuple[dict[str, Any], str]:
@@ -161,14 +198,45 @@ def _gpu_display_names() -> list[str]:
     return names
 
 
+def _pick_ov_variant(ov_dir: Path) -> tuple[str, int]:
+    """Choose an IR under ``ov_dir`` (prefer int8 batch-1 for interactive use)."""
+    from converter.config import ArtifactPaths
+
+    paths = ArtifactPaths.for_dir(ov_dir)
+    for precision, batch in _OV_VARIANT_PREFERENCE:
+        if paths.model_xml(precision, batch).is_file():
+            return precision, batch
+
+    # Fallback: scan ``<precision>_b<batch>/model.xml`` directories.
+    found: list[tuple[str, int]] = []
+    for child in sorted(ov_dir.iterdir()):
+        if not child.is_dir() or not (child / "model.xml").is_file():
+            continue
+        name = child.name
+        if "_b" not in name:
+            continue
+        precision, _, batch_s = name.rpartition("_b")
+        if precision and batch_s.isdigit():
+            found.append((precision, int(batch_s)))
+    if found:
+        found.sort(key=lambda pb: (0 if pb[0] == "int8" else 1, pb[1], pb[0]))
+        return found[0]
+
+    raise FileNotFoundError(
+        f"No OpenVINO IR found under {ov_dir} "
+        f"(expected e.g. int8_b1/model.xml or fp16_b1/model.xml)"
+    )
+
+
 class ModelService:
     """Thread-safe OCR service: load once, recognize many images."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._model: OCRModel | None = None
+        self._model: Any | None = None
         self._config: dict[str, Any] | None = None
         self._checkpoint_dir: Path | None = None
+        self._backend: ModelBackend | None = None
         self._decode_note: str = ""
         self._runtime: dict[str, Any] = {}
         self._busy = False
@@ -190,12 +258,22 @@ class ModelService:
         if self._model is not None:
             charset_n = self._model.charset.num_classes
         ckpt = self._checkpoint_dir
+        backend = self._backend
+        weights = ""
+        if ckpt and backend == "keras":
+            weights = str(ckpt / WEIGHTS_NAME)
+        elif ckpt and backend == "openvino":
+            precision = self._runtime.get("precision", "")
+            batch = self._runtime.get("batch", "")
+            if precision and batch != "":
+                weights = str(ckpt / f"{precision}_b{batch}" / "model.xml")
         return {
             "ready": self.ready,
-            "weights": str(ckpt / WEIGHTS_NAME) if ckpt else "",
+            "backend": backend or "",
+            "weights": weights,
             "config": str(ckpt / CHECKPOINT_CONFIG_NAME) if ckpt else "",
             "checkpoint": str(ckpt) if ckpt else "",
-            "decode": ctc.get("decode", ""),
+            "decode": ctc.get("decode", "") or self._runtime.get("decode", ""),
             "decode_note": self._decode_note,
             "beam_width": ctc.get("beam_width", ""),
             "num_classes": charset_n if charset_n is not None else "",
@@ -203,17 +281,33 @@ class ModelService:
             "max_width": pp.get("max_width", ""),
             "gpus": self._runtime.get("gpus", []),
             "gpu_names": self._runtime.get("gpu_names", []),
+            "device": self._runtime.get("device", ""),
+            "precision": self._runtime.get("precision", ""),
+            "batch": self._runtime.get("batch", ""),
             "tensorflow": self._runtime.get("tensorflow", ""),
+            "openvino": self._runtime.get("openvino", ""),
             "project_root": str(project_root()),
         }
 
     def load(self, checkpoint: str | Path) -> dict[str, Any]:
-        """Load a checkpoint directory (blocking). Prefer calling from a worker thread."""
+        """Load a Keras or OpenVINO artifact directory (blocking)."""
+        root = Path(checkpoint)
+        backend = detect_model_format(root)
+        if backend == "keras":
+            return self._load_keras(root)
+        return self._load_openvino(root)
+
+    def _load_keras(self, checkpoint: Path) -> dict[str, Any]:
+        """Load Keras CRNN; prefer GPU via TensorFlow runtime config."""
+        from vie_handwritten.model import OCRModel
+
         root = resolve_checkpoint_dir(checkpoint)
         config, note = _prepare_config(load_checkpoint_config(root), root)
 
-        self._runtime = configure_runtime()
-        self._runtime["gpu_names"] = _gpu_display_names()
+        runtime = configure_runtime()
+        runtime["gpu_names"] = _gpu_display_names()
+        runtime["device"] = "GPU" if runtime.get("gpu_count") else "CPU"
+        runtime["backend"] = "keras"
         try:
             model = OCRModel.from_checkpoint(root, config=config)
         except Exception as exc:  # noqa: BLE001
@@ -229,7 +323,81 @@ class ModelService:
             self._model = model
             self._config = model.config
             self._checkpoint_dir = root
+            self._backend = "keras"
             self._decode_note = note
+            self._runtime = runtime
+        logger.info(
+            "Loaded Keras checkpoint %s on %s (decode=%s)",
+            root,
+            runtime["device"],
+            model.config.get("ctc", {}).get("decode"),
+        )
+        return self.info()
+
+    def _load_openvino(self, ov_dir: Path) -> dict[str, Any]:
+        """Load OpenVINO IR; always compile on CPU."""
+        try:
+            from converter.runtime import OpenVINOCR, resolve_openvino_dir
+        except ImportError as exc:
+            raise ImportError(
+                "OpenVINO artifact selected but the openvino package is not installed. "
+                "Install with: uv sync --extra openvino"
+            ) from exc
+
+        root = resolve_openvino_dir(ov_dir)
+        precision, batch = _pick_ov_variant(root)
+        # Force CPU regardless of host GPUs.
+        model = OpenVINOCR.from_dir(root, batch=batch, precision=precision, device="CPU")
+
+        note = ""
+        if model.decoder.method != "beam_lm":
+            note = (
+                f"LM missing or unavailable in artifact; using {model.decoder.method} decode"
+            )
+
+        # Keep config decode field in sync for the info panel.
+        config = dict(model.config)
+        ctc = dict(config.get("ctc", {}))
+        ctc["decode"] = model.decoder.method
+        ctc["beam_width"] = model.decoder.beam_width
+        config["ctc"] = ctc
+
+        ov_ver = ""
+        try:
+            import openvino as ov
+
+            ov_ver = getattr(ov, "__version__", "") or ""
+        except Exception:  # noqa: BLE001
+            ov_ver = ""
+
+        runtime: dict[str, Any] = {
+            "backend": "openvino",
+            "device": "CPU",
+            "precision": precision,
+            "batch": batch,
+            "decode": model.decoder.method,
+            "openvino": ov_ver,
+            "gpus": [],
+            "gpu_names": [],
+            "tensorflow": "",
+        }
+        # Prefer version recorded at convert time when present.
+        build_info = root / BUILD_INFO_NAME
+        if build_info.is_file():
+            try:
+                bi = load_config(build_info)
+                ov_ver = bi.get("openvino_version") or ov_ver
+                runtime["openvino"] = ov_ver
+            except Exception:  # noqa: BLE001
+                pass
+
+        with self._lock:
+            self._model = model
+            self._config = config
+            self._checkpoint_dir = root
+            self._backend = "openvino"
+            self._decode_note = note
+            self._runtime = runtime
         return self.info()
 
     def recognize(self, image_path: str | Path) -> tuple[str, float]:
@@ -246,7 +414,7 @@ class ModelService:
         elapsed_ms = (time.perf_counter() - t0) * 1000.0
         return text, elapsed_ms
 
-    def recognize_lines(self, line_images: list["np.ndarray"]) -> list[tuple[str, float]]:
+    def recognize_lines(self, line_images: list[np.ndarray]) -> list[tuple[str, float]]:
         """Run OCR on multiple pre-segmented line images (blocking).
 
         Each line_image should be a grayscale ndarray (dark text on white bg).
