@@ -7,7 +7,6 @@ Entry point ``vie-ocr`` (see pyproject ``[project.scripts]``); also runnable as
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 
 from vie_handwritten.utils import configure_runtime
@@ -24,10 +23,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    data_p = sub.add_parser("build-data", help="Build normalized JSONL manifests")
-    data_p.add_argument("--config", default="configs/default.yaml")
-    data_p.add_argument("--rebuild", action="store_true", help="Rebuild manifests")
-
     train_p = sub.add_parser("train", help="Train CRNN (2 phases: freeze CNN → train all)")
     train_p.add_argument("--config", default="configs/default.yaml")
     train_p.add_argument(
@@ -35,7 +30,6 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Self-contained checkpoint dir (weights, config, charset, build_info, lm/)",
     )
-    train_p.add_argument("--rebuild-data", action="store_true", help="Rebuild manifests first")
 
     lm_p = sub.add_parser("build-lm", help="Train KenLM syllable LM from train split")
     lm_p.add_argument("--config", default="configs/default.yaml")
@@ -55,6 +49,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         choices=["greedy", "beam", "beam_lm"],
         help="Override ctc.decode from the checkpoint config",
+    )
+    eval_p.add_argument(
+        "--failures-out",
+        default=None,
+        help="JSON path for failed samples (default: {checkpoint}/failures_{split}.json)",
     )
 
     infer_p = sub.add_parser("infer", help="Run OCR on an image")
@@ -90,22 +89,10 @@ def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
     configure_runtime()  # GPU memory growth before any tensor allocation
 
-    if args.command == "build-data":
-        from vie_handwritten.dataset import build_manifests
-        from vie_handwritten.utils import load_config
-
-        config = load_config(args.config)
-        paths = build_manifests(config)
-        summary_file = paths["train"].parent / "summary.json"
-        if summary_file.is_file():
-            counts = json.loads(summary_file.read_text(encoding="utf-8")).get("counts", {})
-            print(json.dumps(counts, ensure_ascii=False))
-        for split, path in paths.items():
-            print(f"  {split}: {path}")
-    elif args.command == "train":
+    if args.command == "train":
         from vie_handwritten.trainer import train
 
-        train(args.config, resume_from=args.resume, rebuild_data=args.rebuild_data)
+        train(args.config, resume_from=args.resume)
     elif args.command == "build-lm":
         from vie_handwritten.kenlm import build_lm
         from vie_handwritten.utils import load_config
@@ -121,8 +108,13 @@ def main(argv: list[str] | None = None) -> None:
             split=args.split,
             max_samples=args.max_samples,
             decode=args.decode,
+            failures_out=args.failures_out,
         )
-        print(f"split={args.split} n={metrics['n']} CER={metrics['cer']:.4f} WER={metrics['wer']:.4f}")
+        print(
+            f"split={args.split} n={metrics['n']} CER={metrics['cer']:.4f} "
+            f"WER={metrics['wer']:.4f} failures={metrics['n_failures']} "
+            f"-> {metrics['failures_out']}"
+        )
     elif args.command == "infer":
         from vie_handwritten.eval import infer
 

@@ -1,35 +1,15 @@
-"""TF-free manifest loading + preprocessing for calibration and benchmarks.
+"""TF-free split loading + preprocessing for calibration and benchmarks.
 
-Reads the JSONL manifests produced by ``vie-ocr build-data`` and preprocesses
-images with the (TF-free) OpenCV pipeline. Manifests must already exist; this
-never triggers the TF-bound dataset builder.
+Discovers samples from on-disk ``train_data`` / ``val_data`` / ``test_data``
+and preprocesses with the (TF-free) OpenCV pipeline — no TensorFlow import.
 """
 
 from __future__ import annotations
 
-import json
 import random
-from pathlib import Path
 from typing import Any
 
 import numpy as np
-
-from vie_handwritten.utils import abs_path
-
-
-def manifest_paths(config: dict[str, Any]) -> dict[str, Path]:
-    base = abs_path(config["data"].get("manifest_dir", "data/manifests"))
-    return {s: base / f"{s}.jsonl" for s in ("train", "val", "test")}
-
-
-def load_manifest(path: str | Path) -> list[dict[str, str]]:
-    records: list[dict[str, str]] = []
-    with Path(path).open(encoding="utf-8") as fh:
-        for line in fh:
-            line = line.strip()
-            if line:
-                records.append(json.loads(line))
-    return records
 
 
 def load_split(
@@ -39,18 +19,14 @@ def load_split(
     max_samples: int | None,
     seed: int = 42,
 ) -> tuple[list[np.ndarray], list[str]]:
-    """Load + preprocess up to ``max_samples`` images from a manifest split."""
+    """Load + preprocess up to ``max_samples`` images from a data split."""
+    from vie_handwritten.dataset import load_split as discover_split
     from vie_handwritten.preprocess import load_image, preprocess
+    from vie_handwritten.utils import abs_path
 
-    paths = manifest_paths(config)
-    if split not in paths:
+    if split not in ("train", "val", "test"):
         raise ValueError(f"Unknown split={split}")
-    manifest = paths[split]
-    if not manifest.is_file():
-        raise FileNotFoundError(
-            f"Manifest missing: {manifest}. Run `vie-ocr build-data` first."
-        )
-    records = load_manifest(manifest)
+    records = discover_split(config, split)  # type: ignore[arg-type]
     if max_samples and len(records) > max_samples:
         records = random.Random(seed).sample(records, max_samples)
 

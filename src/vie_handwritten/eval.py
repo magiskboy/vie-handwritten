@@ -9,13 +9,15 @@ A checkpoint is a directory containing ``model.weights.h5`` and ``config.yaml``.
 
 from __future__ import annotations
 
+import json
 import logging
 import random
 from pathlib import Path
+from typing import Any
 
 import editdistance
 
-from vie_handwritten.dataset import ensure_manifests, load_manifest, resolve_image_path
+from vie_handwritten.dataset import load_split, resolve_image_path
 from vie_handwritten.model import OCRModel
 from vie_handwritten.preprocess import load_image, preprocess
 
@@ -54,16 +56,28 @@ def evaluate_corpus(references: list[str], hypotheses: list[str]) -> dict[str, f
 def evaluate_split(
     model: OCRModel,
     records: list[dict[str, str]],
-) -> dict[str, float]:
-    """Decode every record with an in-memory ``OCRModel`` -> CER/WER metrics."""
+) -> dict[str, Any]:
+    """Decode every record with an in-memory ``OCRModel`` -> CER/WER + failures.
+
+    Returns ``{"cer", "wer", "n", "failures"}`` where ``failures`` is a list of
+    ``{"path", "gt", "predict"}`` for samples where prediction != ground truth.
+    """
     config = model.config
     refs, hyps = [], []
+    failures: list[dict[str, str]] = []
     for rec in records:
-        image = load_image(str(resolve_image_path(config, rec)))
+        path = resolve_image_path(config, rec)
+        image = load_image(str(path))
         arr = preprocess(image, config["preprocess"])
-        hyps.append(model.recognize(arr))
-        refs.append(rec["text"])
-    return evaluate_corpus(refs, hyps)
+        pred = model.recognize(arr)
+        gt = rec["text"]
+        hyps.append(pred)
+        refs.append(gt)
+        if pred != gt:
+            failures.append({"path": str(path), "gt": gt, "predict": pred})
+    metrics = evaluate_corpus(refs, hyps)
+    metrics["failures"] = failures
+    return metrics
 
 
 def evaluate(
@@ -72,20 +86,39 @@ def evaluate(
     split: str = "test",
     max_samples: int | None = None,
     decode: str | None = None,
-) -> dict[str, float]:
-    """Load a checkpoint directory and evaluate CER/WER on a manifest split."""
+    failures_out: str | Path | None = None,
+) -> dict[str, Any]:
+    """Load a checkpoint directory and evaluate CER/WER on a data split.
+
+    Failed samples (pred != GT) are written as JSON to ``failures_out`` when set,
+    otherwise to ``{checkpoint}/failures_{split}.json``.
+    """
+    checkpoint = Path(checkpoint)
     model = OCRModel.from_checkpoint(checkpoint, decode=decode)
     config = model.config
-    manifests = ensure_manifests(config)
-    if split not in manifests:
+    if split not in ("train", "val", "test"):
         raise ValueError(f"Unknown split={split}")
-    records = load_manifest(manifests[split])
+    records = load_split(config, split)  # type: ignore[arg-type]
     if max_samples is not None and len(records) > max_samples:
         seed = int(config.get("project", {}).get("seed", 42))
         records = random.Random(seed).sample(records, max_samples)
 
     metrics = evaluate_split(model, records)
-    logger.info("split=%s n=%s CER=%.4f WER=%.4f", split, metrics["n"], metrics["cer"], metrics["wer"])
+    failures: list[dict[str, str]] = metrics.pop("failures", [])
+    out_path = Path(failures_out) if failures_out is not None else checkpoint / f"failures_{split}.json"
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(json.dumps(failures, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    logger.info(
+        "split=%s n=%s CER=%.4f WER=%.4f failures=%d -> %s",
+        split,
+        metrics["n"],
+        metrics["cer"],
+        metrics["wer"],
+        len(failures),
+        out_path,
+    )
+    metrics["failures_out"] = str(out_path)
+    metrics["n_failures"] = len(failures)
     return metrics
 
 

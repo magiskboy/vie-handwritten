@@ -28,32 +28,26 @@ image → preprocess → ResNet-18 → BiLSTM → Linear → CTC
 ```
 data/images/HWDB_line/
   train_data/<writer_id>/{1.jpg, 2.jpg, ..., label.json}
+  val_data/<writer_id>/...     # writers held-out (writer-independent)
   test_data/<writer_id>/...
 ```
 
-`build-data` sinh manifest JSONL chuẩn hoá (unify `label.json`, split theo writer, lọc OOV):
-
-```bash
-make build-data
-# → data/manifests/{train,val,test}.jsonl + summary.json
-```
-
-- `test` = `test_data` chính thức; `val` = ~10% *writers* tách từ `train_data` (writer-independent); còn lại là `train`.
+Pipeline discover trực tiếp từ ba thư mục trên (lọc OOV lúc load nếu `drop_oov: true`).
 
 ## Cấu trúc source
 
 ```
 Makefile                  # CLI-hoá các tác vụ thường dùng (xem `make help`)
-configs/default.yaml      # cấu hình train / build-data (không dùng khi infer)
+configs/default.yaml      # cấu hình train (không dùng khi infer)
 screenshots/              # ảnh chụp GUI
 src/vie_handwritten/
-  cli.py          # entry point `vie-ocr` (build-data/train/build-lm/evaluate/infer/tune-lm)
+  cli.py          # entry point `vie-ocr` (train/build-lm/evaluate/infer/tune-lm)
   utils.py        # config I/O, self-contained checkpoint/OV artifact bundles
   charset.py      # bảng ký tự ↔ index
   preprocess.py   # OpenCV + scikit-image (ảnh → tensor)
   postprocess.py  # CTC decode + Underthesea/local chuẩn hoá tiếng Việt; lớp CTCDecoder
   lm_decode.py    # TF-free KenLM + pyctcdecode (dùng chung Keras / OpenVINO)
-  dataset.py      # discovery + manifest + tf.data (line only)
+  dataset.py      # discovery + tf.data (line only)
   model.py        # ResNet-18 → BiLSTM → Linear + lớp composition OCRModel (net + postprocess)
   trainer.py      # CTC loss + OCRTrainer + DecodeMetrics + train 2 phase
   eval.py         # metrics CER/WER + evaluate/infer (dùng OCRModel)
@@ -79,7 +73,6 @@ make sync          # = uv sync (khuyến nghị)
 `make evaluate CKPT=... SPLIT=test DECODE=beam_lm`.
 
 ```bash
-make build-data
 make train                                    # → self-contained checkpoints/<name>/
 make evaluate CKPT=checkpoints/<name> SPLIT=test
 make infer IMAGE=path/to/line.png CKPT=checkpoints/<name>
@@ -104,7 +97,7 @@ checkpoints/<name>/
 OpenVINO artifact (sau `vie-ov convert`) tương tự, dưới `<checkpoint>/openvino/` thêm
 `meta.yaml` và các IR `fp16_b*/`, `int8_b*/`; decode mặc định là `beam_lm`.
 
-Tương đương khi không dùng make: `vie-ocr build-data`,
+Tương đương khi không dùng make:
 `vie-ocr evaluate --checkpoint checkpoints/<name> --split test`, ...
 
 ## GUI (GTK4 + libadwaita)

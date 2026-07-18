@@ -1,4 +1,4 @@
-"""Dataset discovery, manifest building, and the ``tf.data`` pipeline.
+"""Dataset discovery and the ``tf.data`` pipeline.
 
 On-disk layout (HWDB, official split by writer)::
 
@@ -6,40 +6,40 @@ On-disk layout (HWDB, official split by writer)::
       train_data/<writer_id>/
         1.jpg, 2.jpg, ...
         label.json                    # {"1.jpg": "văn bản", ...}
+      val_data/<writer_id>/...        # held-out writers (materialized once)
       test_data/<writer_id>/...
 
 ``dataset_dir`` is the full path (from the project root) to the dataset,
 chosen via ``config['data']['dataset_dir']`` (default
 ``data/images/HWDB_line``); switching it to ``data/images/HWDB_word`` etc.
 lets the same pipeline drive a curriculum such as word-first pretraining →
-line fine-tuning. ``root_dir`` stays the base that image paths are stored
-relative to inside the manifests.
+line fine-tuning. ``root_dir`` is the base that image paths are stored
+relative to.
 
-Split is writer-independent: ``test`` = official ``test_data``; ``val`` = a
-fraction of writers held out from ``train_data``. ``build-data`` writes
-normalized JSONL manifests to ``<manifest_dir>/{train,val,test}.jsonl`` so
-train/eval only ever read manifests, decoupled from the disk layout.
+Splits are on-disk subdirs: ``train`` / ``val`` / ``test`` map to
+``train_data`` / ``val_data`` / ``test_data``.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-import random
 import unicodedata
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
-import numpy as np
-import tensorflow as tf
-
-from vie_handwritten.preprocess import load_image, preprocess
 from vie_handwritten.utils import abs_path
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_DATASET_DIR = "data/images/HWDB_line"
+SplitName = Literal["train", "val", "test"]
 _IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff")
+_SPLIT_SUBDIR_KEYS = {
+    "train": ("train_subdir", "train_data"),
+    "val": ("val_subdir", "val_data"),
+    "test": ("test_subdir", "test_data"),
+}
 
 
 def _read_writer_labels(writer_dir: Path) -> dict[str, str]:
@@ -97,98 +97,58 @@ def discover(root_dir: Path, dataset_root: Path, subdir: str) -> list[dict[str, 
     return records
 
 
-def build_manifests(config: dict[str, Any]) -> dict[str, Path]:
-    """Scan ``data.dataset_dir``, split by writer, filter OOV, write JSONL manifests.
+def split_subdir(config: dict[str, Any], split: SplitName) -> str:
+    """Config subdir name for ``train`` / ``val`` / ``test``."""
+    if split not in _SPLIT_SUBDIR_KEYS:
+        raise ValueError(f"Unknown split={split!r}; expected train|val|test")
+    key, default = _SPLIT_SUBDIR_KEYS[split]
+    return str(config["data"].get(key, default))
 
-    Returns ``{"train": path, "val": path, "test": path}``.
-    """
+
+def _oov_vocab(config: dict[str, Any]) -> set[str] | None:
+    """Charset characters (no blank) for OOV filtering, or ``None`` to skip."""
+    if not bool(config["data"].get("drop_oov", True)):
+        return None
     from vie_handwritten.charset import Charset
 
+    declared = abs_path(config["data"]["charset_path"])
+    path = declared if declared.is_file() else abs_path("data/charset/vietnamese.txt")
+    if not path.is_file():
+        raise FileNotFoundError(
+            f"Charset for OOV filter not found (tried {declared} and {path})"
+        )
+    if path != declared:
+        logger.warning("charset_path %s missing; using %s for OOV filter", declared, path)
+    charset = Charset.from_file(path)
+    return set(charset.characters[1:])  # exclude blank at index 0
+
+
+def load_split(config: dict[str, Any], split: SplitName) -> list[dict[str, str]]:
+    """Discover records for a split; NFC-normalize text and optionally drop OOV."""
     data_cfg = config["data"]
     root_dir = abs_path(data_cfg["root_dir"])
-    manifest_dir = abs_path(data_cfg.get("manifest_dir", "data/manifests"))
-    manifest_dir.mkdir(parents=True, exist_ok=True)
-    val_ratio = float(data_cfg.get("val_writers_ratio", 0.1))
-    drop_oov = bool(data_cfg.get("drop_oov", True))
-    seed = int(config.get("project", {}).get("seed", 42))
-
-    charset = Charset.from_file(abs_path(data_cfg["charset_path"]))
-    vocab = set(charset.characters[1:])  # exclude blank at index 0
-
     dataset_root = abs_path(data_cfg.get("dataset_dir", DEFAULT_DATASET_DIR))
-    train_recs = discover(root_dir, dataset_root, data_cfg.get("train_subdir", "train_data"))
-    test_recs = discover(root_dir, dataset_root, data_cfg.get("test_subdir", "test_data"))
+    subdir = split_subdir(config, split)
+    records = discover(root_dir, dataset_root, subdir)
 
-    writers = sorted({r["writer"] for r in train_recs})
-    random.Random(seed).shuffle(writers)
-    n_val = max(1, round(len(writers) * val_ratio)) if writers else 0
-    val_writers = set(writers[:n_val])
-    logger.info("Writers: total=%d val=%d train=%d", len(writers), len(val_writers), len(writers) - len(val_writers))
+    vocab = _oov_vocab(config)
 
-    buckets: dict[str, list[dict[str, str]]] = {"train": [], "val": [], "test": []}
+    out: list[dict[str, str]] = []
     dropped = 0
-
-    def _accept(rec: dict[str, str], split: str) -> None:
-        nonlocal dropped
+    for rec in records:
         text = unicodedata.normalize("NFC", rec["text"])
-        if drop_oov and any(ch not in vocab for ch in text):
+        if vocab is not None and any(ch not in vocab for ch in text):
             dropped += 1
-            return
-        buckets[split].append({"image": rec["image"], "text": text, "writer": rec["writer"], "split": split})
-
-    for r in train_recs:
-        _accept(r, "val" if r["writer"] in val_writers else "train")
-    for r in test_recs:
-        _accept(r, "test")
-
-    paths: dict[str, Path] = {}
-    for split, recs in buckets.items():
-        out = manifest_dir / f"{split}.jsonl"
-        with out.open("w", encoding="utf-8") as fh:
-            for rec in recs:
-                fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
-        paths[split] = out
-
-    summary = {
-        "root_dir": str(root_dir),
-        "dataset_dir": str(dataset_root),
-        "seed": seed,
-        "drop_oov": drop_oov,
-        "dropped_oov": dropped,
-        "counts": {k: len(v) for k, v in buckets.items()},
-    }
-    (manifest_dir / "summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
-    logger.info("Manifests → %s | counts=%s dropped_oov=%d", manifest_dir, summary["counts"], dropped)
-    return paths
-
-
-def load_manifest(path: str | Path) -> list[dict[str, str]]:
-    """Load a JSONL manifest into a list of record dicts."""
-    records: list[dict[str, str]] = []
-    with Path(path).open(encoding="utf-8") as fh:
-        for line in fh:
-            line = line.strip()
-            if line:
-                records.append(json.loads(line))
-    return records
-
-
-def manifest_paths(config: dict[str, Any]) -> dict[str, Path]:
-    """Expected manifest paths (does not build them)."""
-    base = abs_path(config["data"].get("manifest_dir", "data/manifests"))
-    return {s: base / f"{s}.jsonl" for s in ("train", "val", "test")}
-
-
-def ensure_manifests(config: dict[str, Any], *, rebuild: bool = False) -> dict[str, Path]:
-    """Build manifests if missing (or ``rebuild``), else return existing paths."""
-    paths = manifest_paths(config)
-    if rebuild or not all(p.is_file() for p in paths.values()):
-        return build_manifests(config)
-    return paths
+            continue
+        out.append({"image": rec["image"], "text": text, "writer": rec["writer"]})
+    if dropped:
+        logger.info("%s: dropped %d OOV samples", split, dropped)
+    logger.info("%s: %d samples from %s/%s", split, len(out), dataset_root.name, subdir)
+    return out
 
 
 def resolve_image_path(config: dict[str, Any], record: dict[str, str]) -> Path:
-    """Absolute image path for a manifest record."""
+    """Absolute image path for a discovered record."""
     return abs_path(config["data"]["root_dir"]) / record["image"]
 
 
@@ -198,13 +158,17 @@ def build_dataset(
     charset: Any,
     config: dict[str, Any],
     training: bool,
-) -> tf.data.Dataset:
+):
     """Build a finite ``tf.data`` pipeline (one pass = one epoch).
 
     Yields ``({"image", "label_length", "input_length"}, labels)`` batches with
     variable width padded per batch.
     """
+    import numpy as np
+    import tensorflow as tf
+
     from vie_handwritten.model import WIDTH_DOWNSAMPLE
+    from vie_handwritten.preprocess import load_image, preprocess
 
     pp = config["preprocess"]
     root_dir = abs_path(config["data"]["root_dir"])

@@ -15,10 +15,10 @@ project:
 
 data:
   root_dir: data/images
-  manifest_dir: data/manifests
+  dataset_dir: data/images/HWDB_line
   train_subdir: train_data
+  val_subdir: val_data
   test_subdir: test_data
-  val_writers_ratio: 0.1
   max_val_samples: 32
   drop_oov: true
   charset_path: data/charset/vietnamese.txt

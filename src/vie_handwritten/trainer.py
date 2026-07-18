@@ -20,7 +20,7 @@ import tensorflow as tf
 from tensorflow import keras
 
 from vie_handwritten.charset import Charset
-from vie_handwritten.dataset import build_dataset, ensure_manifests, load_manifest, resolve_image_path
+from vie_handwritten.dataset import build_dataset, load_split, resolve_image_path
 from vie_handwritten.eval import evaluate_split
 from vie_handwritten.model import (
     OCRModel,
@@ -282,7 +282,6 @@ def train(
     config_path: str | Path,
     *,
     resume_from: str | Path | None = None,
-    rebuild_data: bool = False,
 ) -> OCRTrainer:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     logger.info("Runtime: %s", configure_runtime())
@@ -299,9 +298,8 @@ def train(
     save_checkpoint_bundle(config, ckpt_root)
     weights_path = ckpt_root / WEIGHTS_NAME
 
-    manifests = ensure_manifests(config, rebuild=rebuild_data)
-    train_records = load_manifest(manifests["train"])
-    val_records = load_manifest(manifests["val"])
+    train_records = load_split(config, "train")
+    val_records = load_split(config, "val")
     max_val = config["data"].get("max_val_samples")
     val_ds = build_dataset(
         _subsample(val_records, max_val, seed), charset=charset, config=config, training=False
@@ -381,7 +379,7 @@ def train(
     save_checkpoint_bundle(config, ckpt_root)
 
     ocr = OCRModel(crnn, charset, CTCDecoder.from_config(charset, config), config=config)
-    test_metrics = evaluate_split(ocr, load_manifest(manifests["test"]))
+    test_metrics = evaluate_split(ocr, load_split(config, "test"))
     logger.info(
         "test CER=%.4f WER=%.4f (n=%d) best_val_loss=%.4f → %s",
         test_metrics["cer"],

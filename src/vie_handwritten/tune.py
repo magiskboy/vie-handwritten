@@ -1,4 +1,4 @@
-"""Grid-search KenLM shallow-fusion weights (alpha, beta) on a manifest split.
+"""Grid-search KenLM shallow-fusion weights (alpha, beta) on a data split.
 
 Runs the CRNN forward pass once per image (logits are cached), then re-decodes
 with each (alpha, beta) via ``decoder.reset_params`` so the sweep is cheap.
@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from vie_handwritten.charset import Charset
-from vie_handwritten.dataset import ensure_manifests, load_manifest, resolve_image_path
+from vie_handwritten.dataset import load_split, resolve_image_path
 from vie_handwritten.eval import evaluate_corpus
 from vie_handwritten.model import build_crnn, load_crnn_weights
 from vie_handwritten.postprocess import build_lm_decoder, ctc_lm_decode, normalize_text
@@ -48,7 +48,9 @@ def tune_lm(
     pp_cfg = config.get("postprocess", {})
     charset = Charset.from_file(charset_path(config, artifact_root=root))
 
-    records = load_manifest(ensure_manifests(config)[split])
+    if split not in ("train", "val", "test"):
+        raise ValueError(f"Unknown split={split}")
+    records = load_split(config, split)  # type: ignore[arg-type]
     if max_samples and len(records) > max_samples:
         records = records[:max_samples]
 

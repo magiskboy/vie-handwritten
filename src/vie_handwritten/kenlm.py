@@ -23,7 +23,7 @@ import unicodedata
 from pathlib import Path
 from typing import Any
 
-from vie_handwritten.dataset import ensure_manifests, load_manifest
+from vie_handwritten.dataset import load_split
 from vie_handwritten.utils import abs_path, project_root
 
 logger = logging.getLogger(__name__)
@@ -55,8 +55,7 @@ def _lm_dir(config: dict[str, Any]) -> Path:
 
 def build_corpus(config: dict[str, Any], out_path: Path) -> list[str]:
     """Write one NFC-normalized train transcript per line; return the lines."""
-    manifests = ensure_manifests(config)
-    records = load_manifest(manifests["train"])
+    records = load_split(config, "train")
     lines: list[str] = []
     for rec in records:
         text = unicodedata.normalize("NFC", rec["text"]).strip()
