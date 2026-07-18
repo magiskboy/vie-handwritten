@@ -21,10 +21,8 @@ htmlcov/
 .DS_Store
 *.swp
 
-# Data: toàn bộ được nén thành data.zip và KHÔNG đẩy lên git.
-# Ngoại lệ: charset (bảng ký tự) nhỏ và cần để chạy code nên vẫn track.
-/data/*
-!/data/charset/
+# Data (including charset) — keep local, not in git
+/data/
 # Archive nén của thư mục data (backup/chia sẻ ngoài git)
 *.zip
 
