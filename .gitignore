@@ -48,7 +48,7 @@ logs/
 # Trained language model artifacts (rebuild with `build-lm`)
 /lm/
 
-# Demo OpenVINO IR (vendor with `make demo-ov` / `make demo-vendor`)
-/demo/models/**
-!/demo/models/.gitkeep
+# Local-only trees (kept on disk, not in git)
+/demo/
+/labs/
 
