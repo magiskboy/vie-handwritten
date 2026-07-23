@@ -2634,11 +2634,14 @@ dependencies = [
     { name = "editdistance" },
     { name = "kenlm" },
     { name = "matplotlib" },
+    { name = "nncf" },
     { name = "numpy", version = "2.1.3", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform == 'darwin'" },
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12' and sys_platform != 'darwin'" },
     { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12' and sys_platform != 'darwin'" },
     { name = "opencv-python" },
+    { name = "openvino" },
     { name = "pyctcdecode" },
+    { name = "pygobject" },
     { name = "pyyaml" },
     { name = "scikit-image" },
     { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
@@ -2653,25 +2656,18 @@ dev = [
     { name = "pytest" },
     { name = "ruff" },
 ]
-gui = [
-    { name = "pygobject" },
-]
-openvino = [
-    { name = "nncf" },
-    { name = "openvino" },
-]
 
 [package.metadata]
 requires-dist = [
     { name = "editdistance", specifier = ">=0.8" },
     { name = "kenlm", directory = "third_party/kenlm" },
     { name = "matplotlib", specifier = ">=3.11.0" },
-    { name = "nncf", marker = "extra == 'openvino'", specifier = ">=2.14" },
+    { name = "nncf", specifier = ">=2.14" },
     { name = "numpy", specifier = ">=1.26" },
     { name = "opencv-python", specifier = ">=4.10" },
-    { name = "openvino", marker = "extra == 'openvino'", specifier = ">=2025.0" },
+    { name = "openvino", specifier = ">=2025.0" },
     { name = "pyctcdecode", specifier = ">=0.5.0" },
-    { name = "pygobject", marker = "extra == 'gui'", specifier = ">=3.50" },
+    { name = "pygobject", specifier = ">=3.50" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6" },
@@ -2680,7 +2676,7 @@ requires-dist = [
     { name = "tensorflow", extras = ["and-cuda"], specifier = ">=2.19.1" },
     { name = "underthesea", specifier = ">=9.5.0" },
 ]
-provides-extras = ["dev", "gui", "openvino"]
+provides-extras = ["dev"]
 
 [[package]]
 name = "werkzeug"

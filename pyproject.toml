@@ -17,21 +17,15 @@ dependencies = [
     "underthesea>=9.5.0",
     "matplotlib>=3.11.0",
     "scipy>=1.17.1",
+    "pygobject>=3.50",
+    "openvino>=2025.0",
+    "nncf>=2.14",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
     "ruff>=0.6",
-]
-gui = [
-    "pygobject>=3.50",
-]
-# CPU deploy: convert Keras → OpenVINO IR + INT8 quantize.
-# Inference (runtime.py) needs only ``openvino``; ``nncf`` is required to convert.
-openvino = [
-    "openvino>=2025.0",
-    "nncf>=2.14",
 ]
 
 # kenlm has no PyPI wheel; build the query bindings from the vendored source tree.

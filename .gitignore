@@ -11,6 +11,10 @@ wheels/
 .mypy_cache/
 .coverage
 htmlcov/
+configs/*
+!configs/default.yaml
+!configs/debug.yaml
+!configs/openvino.yaml
 
 # Virtual environments
 .venv
